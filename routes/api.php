@@ -3,6 +3,7 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BatchController;
+use App\Http\Controllers\Api\CourseController;
 use App\Http\Controllers\Api\DepartmentController;
 use App\Http\Controllers\Api\InstitutionController;
 use App\Http\Controllers\Api\InstitutionUserController;
@@ -41,6 +42,9 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('teacher-profiles', TeacherProfileController::class);
     Route::apiResource('student-profiles', StudentProfileController::class);
     Route::apiResource('parent-profiles', ParentProfileController::class);
+
     Route::post('/upload/profile-photo', [UploadController::class, 'uploadProfilePhoto']);
     Route::post('/institutions/{institution}/upload-logo', [UploadController::class, 'uploadInstitutionLogo']);
+
+    Route::apiResource('courses', CourseController::class);
 });

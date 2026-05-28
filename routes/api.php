@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BatchController;
 use App\Http\Controllers\Api\DepartmentController;
 use App\Http\Controllers\Api\InstitutionController;
+use App\Http\Controllers\Api\InstitutionUserController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\InstitutionSubscriptionController;
 
@@ -28,4 +29,5 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('institution-subscriptions', InstitutionSubscriptionController::class);
     Route::apiResource('departments', DepartmentController::class);
     Route::apiResource('batches', BatchController::class);
+    Route::apiResource('institution-users', InstitutionUserController::class);
 });

@@ -15,6 +15,7 @@ class Institution extends Model
         'email',
         'phone',
         'website',
+        'logo',
         'address',
         'city',
         'state',
@@ -22,6 +23,17 @@ class Institution extends Model
         'pincode',
         'status',
     ];
+
+    protected $appends = [
+        'logo_url',
+    ];
+
+    public function getLogoUrlAttribute(): ?string
+    {
+        return $this->logo
+            ? asset('storage/' . $this->logo)
+            : null;
+    }
 
     public function subscriptions()
     {

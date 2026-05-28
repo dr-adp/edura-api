@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\BatchController;
 use App\Http\Controllers\Api\DepartmentController;
 use App\Http\Controllers\Api\InstitutionController;
 use App\Http\Controllers\Api\InstitutionUserController;
+use App\Http\Controllers\Api\ParentProfileController;
 use App\Http\Controllers\Api\StudentProfileController;
 use App\Http\Controllers\Api\TeacherProfileController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
@@ -23,15 +24,20 @@ Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
 
 Route::middleware('auth:sanctum')->group(function () {
+
     Route::get('/me', [AuthController::class, 'me']);
     Route::post('/logout', [AuthController::class, 'logout']);
 
     Route::apiResource('institutions', InstitutionController::class);
     Route::apiResource('subscription-plans', SubscriptionPlanController::class);
     Route::apiResource('institution-subscriptions', InstitutionSubscriptionController::class);
+
     Route::apiResource('departments', DepartmentController::class);
     Route::apiResource('batches', BatchController::class);
+
     Route::apiResource('institution-users', InstitutionUserController::class);
+
     Route::apiResource('teacher-profiles', TeacherProfileController::class);
     Route::apiResource('student-profiles', StudentProfileController::class);
+    Route::apiResource('parent-profiles', ParentProfileController::class);
 });

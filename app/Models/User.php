@@ -12,27 +12,23 @@ class User extends Authenticatable
 {
     use HasApiTokens, HasFactory, Notifiable;
 
-    /**
-     * Mass assignable attributes
-     */
     protected $fillable = [
         'name',
         'email',
+        'profile_photo',
         'password',
         'role_id',
     ];
 
-    /**
-     * Hidden attributes
-     */
     protected $hidden = [
         'password',
         'remember_token',
     ];
 
-    /**
-     * Attribute casting
-     */
+    protected $appends = [
+        'profile_photo_url',
+    ];
+
     protected function casts(): array
     {
         return [
@@ -41,9 +37,13 @@ class User extends Authenticatable
         ];
     }
 
-    /**
-     * User belongs to Role
-     */
+    public function getProfilePhotoUrlAttribute(): ?string
+    {
+        return $this->profile_photo
+            ? asset('storage/' . $this->profile_photo)
+            : null;
+    }
+
     public function role()
     {
         return $this->belongsTo(Role::class);

@@ -34,4 +34,9 @@ class Institution extends Model
             ->where('status', 'active')
             ->latestOfMany();
     }
+
+    public function departments()
+    {
+        return $this->hasMany(Department::class);
+    }
 }

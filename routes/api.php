@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\DepartmentController;
 use App\Http\Controllers\Api\InstitutionController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\InstitutionSubscriptionController;
@@ -24,4 +25,5 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('institutions', InstitutionController::class);
     Route::apiResource('subscription-plans', SubscriptionPlanController::class);
     Route::apiResource('institution-subscriptions', InstitutionSubscriptionController::class);
+    Route::apiResource('departments', DepartmentController::class);
 });

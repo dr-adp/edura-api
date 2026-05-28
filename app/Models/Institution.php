@@ -39,4 +39,9 @@ class Institution extends Model
     {
         return $this->hasMany(Department::class);
     }
+
+    public function batches()
+    {
+        return $this->hasMany(Batch::class);
+    }
 }

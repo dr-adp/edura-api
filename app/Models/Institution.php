@@ -22,4 +22,16 @@ class Institution extends Model
         'pincode',
         'status',
     ];
+
+    public function subscriptions()
+    {
+        return $this->hasMany(InstitutionSubscription::class);
+    }
+
+    public function activeSubscription()
+    {
+        return $this->hasOne(InstitutionSubscription::class)
+            ->where('status', 'active')
+            ->latestOfMany();
+    }
 }

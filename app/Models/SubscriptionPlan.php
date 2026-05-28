@@ -37,4 +37,9 @@ class SubscriptionPlan extends Model
         'allow_noticeboard' => 'boolean',
         'allow_notes_upload' => 'boolean',
     ];
+
+    public function institutionSubscriptions()
+    {
+        return $this->hasMany(InstitutionSubscription::class);
+    }
 }

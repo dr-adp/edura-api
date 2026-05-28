@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\InstitutionController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
+use App\Http\Controllers\Api\InstitutionSubscriptionController;
 
 Route::get('/health', function () {
     return response()->json([
@@ -22,4 +23,5 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::apiResource('institutions', InstitutionController::class);
     Route::apiResource('subscription-plans', SubscriptionPlanController::class);
+    Route::apiResource('institution-subscriptions', InstitutionSubscriptionController::class);
 });

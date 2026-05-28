@@ -11,6 +11,7 @@ use App\Http\Controllers\Api\StudentProfileController;
 use App\Http\Controllers\Api\TeacherProfileController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\InstitutionSubscriptionController;
+use App\Http\Controllers\Api\UploadController;
 
 Route::get('/health', function () {
     return response()->json([
@@ -40,4 +41,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('teacher-profiles', TeacherProfileController::class);
     Route::apiResource('student-profiles', StudentProfileController::class);
     Route::apiResource('parent-profiles', ParentProfileController::class);
+    Route::post('/upload/profile-photo', [UploadController::class, 'uploadProfilePhoto']);
+    Route::post('/institutions/{institution}/upload-logo', [UploadController::class, 'uploadInstitutionLogo']);
 });

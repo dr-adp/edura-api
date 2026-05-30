@@ -70,4 +70,10 @@ class Course extends Model
         return $this->hasMany(CourseSection::class)
             ->orderBy('sort_order');
     }
+
+    public function lessons()
+    {
+        return $this->hasMany(Lesson::class)
+            ->orderBy('sort_order');
+    }
 }

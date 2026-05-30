@@ -65,4 +65,9 @@ class Course extends Model
     {
         return $this->belongsTo(TeacherProfile::class);
     }
+    public function sections()
+    {
+        return $this->hasMany(CourseSection::class)
+            ->orderBy('sort_order');
+    }
 }

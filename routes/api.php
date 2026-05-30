@@ -13,6 +13,7 @@ use App\Http\Controllers\Api\TeacherProfileController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\InstitutionSubscriptionController;
 use App\Http\Controllers\Api\UploadController;
+use App\Http\Controllers\Api\CourseSectionController;
 
 Route::get('/health', function () {
     return response()->json([
@@ -47,4 +48,5 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/institutions/{institution}/upload-logo', [UploadController::class, 'uploadInstitutionLogo']);
 
     Route::apiResource('courses', CourseController::class);
+    Route::apiResource('course-sections', CourseSectionController::class);
 });

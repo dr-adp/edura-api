@@ -15,6 +15,7 @@ use App\Http\Controllers\Api\InstitutionSubscriptionController;
 use App\Http\Controllers\Api\UploadController;
 use App\Http\Controllers\Api\CourseSectionController;
 use App\Http\Controllers\Api\LessonController;
+use App\Http\Controllers\Api\LessonResourceController;
 
 Route::get('/health', function () {
     return response()->json([
@@ -51,4 +52,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('courses', CourseController::class);
     Route::apiResource('course-sections', CourseSectionController::class);
     Route::apiResource('lessons', LessonController::class);
+
+    Route::apiResource('lesson-resources', LessonResourceController::class);
 });

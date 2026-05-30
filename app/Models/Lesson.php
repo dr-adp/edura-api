@@ -38,4 +38,10 @@ class Lesson extends Model
     {
         return $this->belongsTo(CourseSection::class);
     }
+
+    public function resources()
+    {
+        return $this->hasMany(LessonResource::class)
+            ->orderBy('sort_order');
+    }
 }

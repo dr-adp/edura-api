@@ -87,6 +87,9 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::post('/gradebooks/recalculate', [GradebookController::class, 'recalculate']);
         Route::apiResource('gradebooks', GradebookController::class);
 
+
+        Route::post('/certificates/{certificate}/generate', [CertificateController::class, 'generate']);
+        Route::get('/certificates/{certificate}/download', [CertificateController::class, 'download']);
         Route::apiResource('certificates', CertificateController::class);
     });
 

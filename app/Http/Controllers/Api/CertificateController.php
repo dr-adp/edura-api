@@ -7,7 +7,9 @@ use App\Models\Gradebook;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Controller;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Barryvdh\DomPDF\Facade\Pdf;
 
 class CertificateController extends Controller
 {
@@ -65,9 +67,11 @@ class CertificateController extends Controller
             ]
         );
 
+        $this->generateCertificatePdf($certificate);
+
         return response()->json([
             'message' => 'Certificate issued successfully.',
-            'data' => $certificate->load([
+            'data' => $certificate->fresh()->load([
                 'course',
                 'studentProfile.user',
                 'gradebook'
@@ -108,10 +112,60 @@ class CertificateController extends Controller
 
     public function destroy(Certificate $certificate): JsonResponse
     {
+        if ($certificate->certificate_file && Storage::disk('public')->exists($certificate->certificate_file)) {
+            Storage::disk('public')->delete($certificate->certificate_file);
+        }
+
         $certificate->delete();
 
         return response()->json([
             'message' => 'Certificate deleted successfully.',
+        ]);
+    }
+
+    public function generate(Certificate $certificate): JsonResponse
+    {
+        $this->generateCertificatePdf($certificate);
+
+        return response()->json([
+            'message' => 'Certificate PDF generated successfully.',
+            'data' => $certificate->fresh()->load([
+                'course',
+                'studentProfile.user',
+                'gradebook'
+            ]),
+        ]);
+    }
+
+    public function download(Certificate $certificate)
+    {
+        if (!$certificate->certificate_file || !Storage::disk('public')->exists($certificate->certificate_file)) {
+            $this->generateCertificatePdf($certificate);
+            $certificate = $certificate->fresh();
+        }
+
+        return Storage::disk('public')->download($certificate->certificate_file);
+    }
+
+    private function generateCertificatePdf(Certificate $certificate): void
+    {
+        $certificate->load([
+            'course',
+            'studentProfile.user',
+            'gradebook'
+        ]);
+
+        $fileName = 'certificate-' . $certificate->certificate_number . '.pdf';
+        $filePath = 'certificates/' . $fileName;
+
+        $pdf = Pdf::loadView('certificates.template', [
+            'certificate' => $certificate,
+        ])->setPaper('a4', 'landscape');
+
+        Storage::disk('public')->put($filePath, $pdf->output());
+
+        $certificate->update([
+            'certificate_file' => $filePath,
         ]);
     }
 }

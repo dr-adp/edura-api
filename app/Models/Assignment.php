@@ -50,4 +50,9 @@ class Assignment extends Model
     {
         return $this->belongsTo(TeacherProfile::class);
     }
+
+    public function submissions()
+    {
+        return $this->hasMany(AssignmentSubmission::class);
+    }
 }

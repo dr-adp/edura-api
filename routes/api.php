@@ -21,6 +21,7 @@ use App\Http\Controllers\Api\LessonProgressController;
 use App\Http\Controllers\Api\LiveClassController;
 use App\Http\Controllers\Api\LiveClassAttendanceController;
 use App\Http\Controllers\Api\AssignmentController;
+use App\Http\Controllers\Api\AssignmentSubmissionController;
 
 Route::get('/health', function () {
     return response()->json([
@@ -65,4 +66,5 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::apiResource('live-class-attendances', LiveClassAttendanceController::class);
     Route::apiResource('assignments', AssignmentController::class);
+    Route::apiResource('assignment-submissions', AssignmentSubmissionController::class);
 });

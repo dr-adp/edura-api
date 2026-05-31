@@ -38,4 +38,9 @@ class Gradebook extends Model
     {
         return $this->belongsTo(StudentProfile::class);
     }
+
+    public function certificate()
+    {
+        return $this->hasOne(Certificate::class);
+    }
 }

@@ -30,6 +30,7 @@ use App\Http\Controllers\Api\AssignmentEvaluationController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\InstitutionSubscriptionController;
 use App\Http\Controllers\Api\GradebookController;
+use App\Http\Controllers\Api\CertificateController;
 
 Route::get('/health', function () {
     return response()->json([
@@ -82,6 +83,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::apiResource('question-options', QuestionOptionController::class);
         Route::apiResource('quizzes', QuizController::class);
         Route::apiResource('quiz-questions', QuizQuestionController::class);
+
+        Route::post('/gradebooks/recalculate', [GradebookController::class, 'recalculate']);
+        Route::apiResource('gradebooks', GradebookController::class);
+
+        Route::apiResource('certificates', CertificateController::class);
     });
 
     Route::middleware(['role:super-admin|institution-admin|teacher|student'])->group(function () {
@@ -89,8 +95,10 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::apiResource('assignment-submissions', AssignmentSubmissionController::class);
         Route::apiResource('quiz-attempts', QuizAttemptController::class);
         Route::apiResource('quiz-answers', QuizAnswerController::class);
+    });
 
-        Route::apiResource('gradebooks', GradebookController::class);
-        Route::post('/gradebooks/recalculate', [GradebookController::class, 'recalculate']);
+    Route::middleware(['role:super-admin|institution-admin|teacher|student|parent'])->group(function () {
+        Route::get('/my-gradebooks', [GradebookController::class, 'index']);
+        Route::get('/my-certificates', [CertificateController::class, 'index']);
     });
 });

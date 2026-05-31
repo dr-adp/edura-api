@@ -46,4 +46,9 @@ class QuestionBank extends Model
     {
         return $this->hasMany(QuizQuestion::class);
     }
+
+    public function quizAnswers()
+    {
+        return $this->hasMany(QuizAnswer::class);
+    }
 }

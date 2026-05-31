@@ -5,28 +5,36 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 
-class QuestionOption extends Model
+class QuizAnswer extends Model
 {
     use HasFactory;
 
     protected $fillable = [
+        'quiz_attempt_id',
         'question_bank_id',
-        'option_text',
+        'question_option_id',
+        'answer_text',
         'is_correct',
-        'sort_order',
+        'marks_obtained',
     ];
 
     protected $casts = [
         'is_correct' => 'boolean',
+        'marks_obtained' => 'decimal:2',
     ];
+
+    public function quizAttempt()
+    {
+        return $this->belongsTo(QuizAttempt::class);
+    }
 
     public function questionBank()
     {
         return $this->belongsTo(QuestionBank::class);
     }
 
-    public function quizAnswers()
+    public function questionOption()
     {
-        return $this->hasMany(QuizAnswer::class);
+        return $this->belongsTo(QuestionOption::class);
     }
 }

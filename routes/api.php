@@ -26,6 +26,7 @@ use App\Http\Controllers\Api\AssignmentEvaluationController;
 use App\Http\Controllers\Api\QuestionBankController;
 use App\Http\Controllers\Api\QuestionOptionController;
 use App\Http\Controllers\Api\QuizController;
+use App\Http\Controllers\Api\QuizQuestionController;
 
 Route::get('/health', function () {
     return response()->json([
@@ -76,4 +77,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('question-banks', QuestionBankController::class);
     Route::apiResource('question-options', QuestionOptionController::class);
     Route::apiResource('quizzes', QuizController::class);
+    Route::apiResource('quiz-questions', QuizQuestionController::class);
+
+    
 });

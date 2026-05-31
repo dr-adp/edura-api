@@ -41,4 +41,9 @@ class QuestionBank extends Model
         return $this->hasMany(QuestionOption::class)
             ->orderBy('sort_order');
     }
+
+    public function quizQuestions()
+    {
+        return $this->hasMany(QuizQuestion::class);
+    }
 }

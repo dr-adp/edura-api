@@ -54,4 +54,10 @@ class Quiz extends Model
     {
         return $this->belongsTo(TeacherProfile::class);
     }
+
+    public function quizQuestions()
+    {
+        return $this->hasMany(QuizQuestion::class)
+            ->orderBy('sort_order');
+    }
 }

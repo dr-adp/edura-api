@@ -13,11 +13,18 @@ class LessonResource extends Model
         'lesson_id',
         'title',
         'resource_type',
+        'video_provider',
         'content',
         'file_path',
         'external_url',
+        'video_duration_minutes',
+        'video_size_mb',
         'sort_order',
         'status',
+    ];
+
+    protected $casts = [
+        'video_size_mb' => 'decimal:2',
     ];
 
     protected $appends = [

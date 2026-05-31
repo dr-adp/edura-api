@@ -27,16 +27,34 @@ class LessonResourceController extends Controller
         $validated = $request->validate([
             'lesson_id' => ['required', 'exists:lessons,id'],
             'title' => ['required', 'string', 'max:255'],
+
             'resource_type' => ['nullable', 'in:text,pdf,video,image,link,document,other'],
+            'video_provider' => ['nullable', 'in:local,youtube,vimeo,bunny,cloudflare,external'],
+
             'content' => ['nullable', 'string'],
-            'external_url' => ['nullable', 'string', 'max:500'],
-            'file' => ['nullable', 'file', 'mimes:pdf,doc,docx,ppt,pptx,jpg,jpeg,png,webp,mp4,mov,avi', 'max:51200'],
+            'external_url' => ['nullable', 'string', 'max:1000'],
+
+            'video_duration_minutes' => ['nullable', 'integer', 'min:1'],
+            'video_size_mb' => ['nullable', 'numeric', 'min:0'],
+
+            'file' => [
+                'nullable',
+                'file',
+                'mimes:pdf,doc,docx,ppt,pptx,jpg,jpeg,png,webp,mp4,mov,avi,mkv,webm',
+                'max:512000'
+            ],
+
             'sort_order' => ['nullable', 'integer'],
             'status' => ['nullable', 'in:active,inactive'],
         ]);
 
         if ($request->hasFile('file')) {
             $validated['file_path'] = $request->file('file')->store('lesson-resources', 'public');
+
+            if (($validated['resource_type'] ?? null) === 'video') {
+                $validated['video_provider'] = $validated['video_provider'] ?? 'local';
+                $validated['video_size_mb'] = round($request->file('file')->getSize() / 1024 / 1024, 2);
+            }
         }
 
         unset($validated['file']);
@@ -62,10 +80,23 @@ class LessonResourceController extends Controller
         $validated = $request->validate([
             'lesson_id' => ['sometimes', 'exists:lessons,id'],
             'title' => ['sometimes', 'string', 'max:255'],
+
             'resource_type' => ['nullable', 'in:text,pdf,video,image,link,document,other'],
+            'video_provider' => ['nullable', 'in:local,youtube,vimeo,bunny,cloudflare,external'],
+
             'content' => ['nullable', 'string'],
-            'external_url' => ['nullable', 'string', 'max:500'],
-            'file' => ['nullable', 'file', 'mimes:pdf,doc,docx,ppt,pptx,jpg,jpeg,png,webp,mp4,mov,avi', 'max:51200'],
+            'external_url' => ['nullable', 'string', 'max:1000'],
+
+            'video_duration_minutes' => ['nullable', 'integer', 'min:1'],
+            'video_size_mb' => ['nullable', 'numeric', 'min:0'],
+
+            'file' => [
+                'nullable',
+                'file',
+                'mimes:pdf,doc,docx,ppt,pptx,jpg,jpeg,png,webp,mp4,mov,avi,mkv,webm',
+                'max:512000'
+            ],
+
             'sort_order' => ['nullable', 'integer'],
             'status' => ['nullable', 'in:active,inactive'],
         ]);
@@ -76,6 +107,11 @@ class LessonResourceController extends Controller
             }
 
             $validated['file_path'] = $request->file('file')->store('lesson-resources', 'public');
+
+            if (($validated['resource_type'] ?? $lessonResource->resource_type) === 'video') {
+                $validated['video_provider'] = $validated['video_provider'] ?? 'local';
+                $validated['video_size_mb'] = round($request->file('file')->getSize() / 1024 / 1024, 2);
+            }
         }
 
         unset($validated['file']);

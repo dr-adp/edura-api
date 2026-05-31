@@ -35,4 +35,10 @@ class QuestionBank extends Model
     {
         return $this->belongsTo(Lesson::class);
     }
+
+    public function options()
+    {
+        return $this->hasMany(QuestionOption::class)
+            ->orderBy('sort_order');
+    }
 }

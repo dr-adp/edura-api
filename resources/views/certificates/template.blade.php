@@ -8,14 +8,19 @@
         body {
             font-family: DejaVu Sans, sans-serif;
             text-align: center;
-            padding: 40px;
+            padding: 35px;
             color: #111827;
         }
 
         .certificate {
             border: 8px solid #111827;
-            padding: 50px;
+            padding: 40px;
             height: 620px;
+        }
+
+        .logo {
+            height: 75px;
+            margin-bottom: 15px;
         }
 
         .brand {
@@ -25,55 +30,80 @@
         }
 
         .title {
-            font-size: 38px;
-            margin-top: 50px;
+            font-size: 36px;
+            margin-top: 35px;
             font-weight: bold;
         }
 
         .subtitle {
-            font-size: 18px;
-            margin-top: 20px;
+            font-size: 17px;
+            margin-top: 18px;
         }
 
         .student {
             font-size: 30px;
             font-weight: bold;
-            margin-top: 35px;
+            margin-top: 30px;
         }
 
         .course {
-            font-size: 24px;
-            margin-top: 30px;
+            font-size: 23px;
+            margin-top: 25px;
             font-weight: bold;
         }
 
         .details {
-            margin-top: 35px;
-            font-size: 15px;
+            margin-top: 30px;
+            font-size: 14px;
+            line-height: 1.7;
         }
 
         .footer {
-            margin-top: 70px;
+            margin-top: 55px;
             display: flex;
             justify-content: space-between;
-            font-size: 14px;
+            font-size: 13px;
+        }
+
+        .signature {
+            height: 50px;
+            margin-bottom: 6px;
         }
 
         .line {
             border-top: 1px solid #111827;
-            width: 180px;
+            width: 190px;
             margin: 0 auto 8px;
+        }
+
+        .footer-text {
+            margin-top: 25px;
+            font-size: 11px;
+            color: #4b5563;
         }
     </style>
 </head>
 
 <body>
     <div class="certificate">
-        <div class="brand">AGHORI EDURA</div>
 
-        <div class="title">Certificate of Completion</div>
+        @if (!empty($setting?->logo))
+            <img class="logo" src="{{ public_path('storage/' . $setting->logo) }}">
+        @elseif(!empty($certificate->course?->institution?->logo))
+            <img class="logo" src="{{ public_path('storage/' . $certificate->course->institution->logo) }}">
+        @endif
 
-        <div class="subtitle">This certificate is proudly presented to</div>
+        <div class="brand">
+            {{ $certificate->course->institution->name ?? 'AGHORI EDURA' }}
+        </div>
+
+        <div class="title">
+            {{ $setting->certificate_title ?? 'Certificate of Completion' }}
+        </div>
+
+        <div class="subtitle">
+            {{ $setting->certificate_subtitle ?? 'This certificate is proudly presented to' }}
+        </div>
 
         <div class="student">
             {{ $certificate->studentProfile->user->name ?? 'Student Name' }}
@@ -99,10 +129,26 @@
             </div>
 
             <div>
+                @if (!empty($setting?->signature_image))
+                    <img class="signature" src="{{ public_path('storage/' . $setting->signature_image) }}">
+                @endif
+
                 <div class="line"></div>
-                Authorized Signature
+
+                {{ $setting->authorized_person_name ?? 'Authorized Signature' }} <br>
+
+                @if (!empty($setting?->authorized_person_designation))
+                    {{ $setting->authorized_person_designation }}
+                @endif
             </div>
         </div>
+
+        @if (!empty($setting?->footer_text))
+            <div class="footer-text">
+                {{ $setting->footer_text }}
+            </div>
+        @endif
+
     </div>
 </body>
 

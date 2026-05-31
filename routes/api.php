@@ -31,6 +31,7 @@ use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\InstitutionSubscriptionController;
 use App\Http\Controllers\Api\GradebookController;
 use App\Http\Controllers\Api\CertificateController;
+use App\Http\Controllers\Api\CertificateSettingController;
 
 Route::get('/health', function () {
     return response()->json([
@@ -91,6 +92,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::post('/certificates/{certificate}/generate', [CertificateController::class, 'generate']);
         Route::get('/certificates/{certificate}/download', [CertificateController::class, 'download']);
         Route::apiResource('certificates', CertificateController::class);
+        Route::apiResource('certificate-settings', CertificateSettingController::class);
     });
 
     Route::middleware(['role:super-admin|institution-admin|teacher|student'])->group(function () {

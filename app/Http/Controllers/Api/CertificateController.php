@@ -10,6 +10,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Barryvdh\DomPDF\Facade\Pdf;
+use App\Models\CertificateSetting;
 
 class CertificateController extends Controller
 {
@@ -150,16 +151,25 @@ class CertificateController extends Controller
     private function generateCertificatePdf(Certificate $certificate): void
     {
         $certificate->load([
-            'course',
+            'course.institution',
             'studentProfile.user',
             'gradebook'
         ]);
+
+        $setting = null;
+
+        if ($certificate->course?->institution_id) {
+            $setting = CertificateSetting::where('institution_id', $certificate->course->institution_id)
+                ->where('status', 'active')
+                ->first();
+        }
 
         $fileName = 'certificate-' . $certificate->certificate_number . '.pdf';
         $filePath = 'certificates/' . $fileName;
 
         $pdf = Pdf::loadView('certificates.template', [
             'certificate' => $certificate,
+            'setting' => $setting,
         ])->setPaper('a4', 'landscape');
 
         Storage::disk('public')->put($filePath, $pdf->output());

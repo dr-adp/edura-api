@@ -56,4 +56,9 @@ class Institution extends Model
     {
         return $this->hasMany(Batch::class);
     }
+
+    public function certificateSetting()
+    {
+        return $this->hasOne(CertificateSetting::class);
+    }
 }

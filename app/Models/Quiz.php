@@ -60,4 +60,9 @@ class Quiz extends Model
         return $this->hasMany(QuizQuestion::class)
             ->orderBy('sort_order');
     }
+
+    public function attempts()
+    {
+        return $this->hasMany(QuizAttempt::class);
+    }
 }

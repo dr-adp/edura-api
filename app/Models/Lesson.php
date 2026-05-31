@@ -44,4 +44,9 @@ class Lesson extends Model
         return $this->hasMany(LessonResource::class)
             ->orderBy('sort_order');
     }
+
+    public function progressRecords()
+    {
+        return $this->hasMany(LessonProgress::class);
+    }
 }

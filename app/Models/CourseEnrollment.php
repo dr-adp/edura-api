@@ -36,4 +36,9 @@ class CourseEnrollment extends Model
     {
         return $this->belongsTo(StudentProfile::class);
     }
+
+    public function lessonProgress()
+    {
+        return $this->hasMany(LessonProgress::class);
+    }
 }

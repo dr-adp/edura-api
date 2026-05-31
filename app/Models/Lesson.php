@@ -54,4 +54,9 @@ class Lesson extends Model
     {
         return $this->hasMany(LiveClass::class);
     }
+
+    public function assignments()
+    {
+        return $this->hasMany(Assignment::class);
+    }
 }

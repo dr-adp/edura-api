@@ -66,4 +66,9 @@ class StudentProfile extends Model
     {
         return $this->hasMany(QuizAttempt::class);
     }
+
+    public function gradebooks()
+    {
+        return $this->hasMany(Gradebook::class);
+    }
 }

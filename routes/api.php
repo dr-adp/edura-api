@@ -29,6 +29,7 @@ use App\Http\Controllers\Api\AssignmentSubmissionController;
 use App\Http\Controllers\Api\AssignmentEvaluationController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\InstitutionSubscriptionController;
+use App\Http\Controllers\Api\GradebookController;
 
 Route::get('/health', function () {
     return response()->json([
@@ -88,5 +89,8 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::apiResource('assignment-submissions', AssignmentSubmissionController::class);
         Route::apiResource('quiz-attempts', QuizAttemptController::class);
         Route::apiResource('quiz-answers', QuizAnswerController::class);
+
+        Route::apiResource('gradebooks', GradebookController::class);
+        Route::post('/gradebooks/recalculate', [GradebookController::class, 'recalculate']);
     });
 });

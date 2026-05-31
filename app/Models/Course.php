@@ -99,4 +99,9 @@ class Course extends Model
     {
         return $this->hasMany(Quiz::class);
     }
+
+    public function gradebooks()
+    {
+        return $this->hasMany(Gradebook::class);
+    }
 }

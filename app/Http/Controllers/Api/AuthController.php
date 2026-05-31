@@ -18,7 +18,7 @@ class AuthController extends Controller
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'email', 'max:255', 'unique:users,email'],
             'password' => ['required', 'string', 'min:8', 'confirmed'],
-            'role' => ['nullable', 'string', 'exists:roles,name'],
+            'role' => ['nullable', 'string', 'in:institution-admin,teacher,student,parent'],
         ]);
 
         $roleName = $request->role ?? 'student';
@@ -32,12 +32,16 @@ class AuthController extends Controller
             'role_id' => $role?->id,
         ]);
 
+        $user->assignRole($roleName);
+
         $token = $user->createToken('edura-api-token')->plainTextToken;
 
         return response()->json([
             'message' => 'Registration successful.',
             'token' => $token,
             'user' => $user->load('role'),
+            'roles' => $user->getRoleNames(),
+            'permissions' => $user->getAllPermissions()->pluck('name'),
         ], 201);
     }
 
@@ -64,13 +68,19 @@ class AuthController extends Controller
             'message' => 'Login successful.',
             'token' => $token,
             'user' => $user,
+            'roles' => $user->getRoleNames(),
+            'permissions' => $user->getAllPermissions()->pluck('name'),
         ]);
     }
 
     public function me(Request $request): JsonResponse
     {
+        $user = $request->user()->load('role');
+
         return response()->json([
-            'user' => $request->user()->load('role'),
+            'user' => $user,
+            'roles' => $user->getRoleNames(),
+            'permissions' => $user->getAllPermissions()->pluck('name'),
         ]);
     }
 

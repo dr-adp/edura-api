@@ -36,4 +36,9 @@ class TeacherProfile extends Model
     {
         return $this->belongsTo(Department::class);
     }
+
+    public function assignmentEvaluations()
+    {
+        return $this->hasMany(AssignmentEvaluation::class);
+    }
 }

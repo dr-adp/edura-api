@@ -45,4 +45,9 @@ class AssignmentSubmission extends Model
     {
         return $this->belongsTo(StudentProfile::class);
     }
+
+    public function evaluation()
+    {
+        return $this->hasOne(AssignmentEvaluation::class);
+    }
 }

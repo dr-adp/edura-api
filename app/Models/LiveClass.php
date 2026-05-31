@@ -62,4 +62,9 @@ class LiveClass extends Model
     {
         return $this->belongsTo(Batch::class);
     }
+
+    public function attendances()
+    {
+        return $this->hasMany(LiveClassAttendance::class);
+    }
 }

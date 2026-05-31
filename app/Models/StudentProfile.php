@@ -51,4 +51,9 @@ class StudentProfile extends Model
     {
         return $this->hasMany(CourseEnrollment::class);
     }
+
+    public function liveClassAttendances()
+    {
+        return $this->hasMany(LiveClassAttendance::class);
+    }
 }

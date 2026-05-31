@@ -19,6 +19,7 @@ use App\Http\Controllers\Api\LessonResourceController;
 use App\Http\Controllers\Api\CourseEnrollmentController;
 use App\Http\Controllers\Api\LessonProgressController;
 use App\Http\Controllers\Api\LiveClassController;
+use App\Http\Controllers\Api\LiveClassAttendanceController;
 
 Route::get('/health', function () {
     return response()->json([
@@ -60,4 +61,6 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('course-enrollments', CourseEnrollmentController::class);
     Route::apiResource('lesson-progress', LessonProgressController::class);
     Route::apiResource('live-classes', LiveClassController::class);
+
+    Route::apiResource('live-class-attendances', LiveClassAttendanceController::class);
 });

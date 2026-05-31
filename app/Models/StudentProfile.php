@@ -47,4 +47,8 @@ class StudentProfile extends Model
     {
         return $this->belongsTo(Batch::class);
     }
+    public function courseEnrollments()
+    {
+        return $this->hasMany(CourseEnrollment::class);
+    }
 }

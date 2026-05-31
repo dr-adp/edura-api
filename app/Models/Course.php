@@ -89,4 +89,9 @@ class Course extends Model
     {
         return $this->hasMany(Assignment::class);
     }
+
+    public function questionBanks()
+    {
+        return $this->hasMany(QuestionBank::class);
+    }
 }

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Models\Certificate;
+use App\Models\CertificateSetting;
 use App\Models\Gradebook;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -10,16 +11,16 @@ use App\Http\Controllers\Controller;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Barryvdh\DomPDF\Facade\Pdf;
-use App\Models\CertificateSetting;
+use SimpleSoftwareIO\QrCode\Facades\QrCode;
 
 class CertificateController extends Controller
 {
     public function index(): JsonResponse
     {
         $certificates = Certificate::with([
-            'course',
+            'course.institution',
             'studentProfile.user',
-            'gradebook'
+            'gradebook',
         ])->latest()->paginate(20);
 
         return response()->json([
@@ -52,6 +53,10 @@ class CertificateController extends Controller
             ], 422);
         }
 
+        $existingCertificate = Certificate::where('course_id', $validated['course_id'])
+            ->where('student_profile_id', $validated['student_profile_id'])
+            ->first();
+
         $certificate = Certificate::updateOrCreate(
             [
                 'course_id' => $validated['course_id'],
@@ -59,11 +64,14 @@ class CertificateController extends Controller
             ],
             [
                 'gradebook_id' => $gradebook->id,
-                'certificate_number' => 'EDURA-' . strtoupper(Str::random(10)),
+                'certificate_number' => $existingCertificate?->certificate_number ?? 'EDURA-' . strtoupper(Str::random(10)),
+                'certificate_uuid' => $existingCertificate?->certificate_uuid ?? (string) Str::uuid(),
+                'verification_token' => $existingCertificate?->verification_token ?? strtoupper(Str::random(16)),
                 'issued_date' => now()->toDateString(),
                 'final_percentage' => $gradebook->percentage,
                 'final_grade' => $gradebook->grade,
                 'status' => 'issued',
+                'verification_status' => 'valid',
                 'remarks' => $validated['remarks'] ?? null,
             ]
         );
@@ -73,9 +81,9 @@ class CertificateController extends Controller
         return response()->json([
             'message' => 'Certificate issued successfully.',
             'data' => $certificate->fresh()->load([
-                'course',
+                'course.institution',
                 'studentProfile.user',
-                'gradebook'
+                'gradebook',
             ]),
         ], 201);
     }
@@ -85,9 +93,9 @@ class CertificateController extends Controller
         return response()->json([
             'message' => 'Certificate fetched successfully.',
             'data' => $certificate->load([
-                'course',
+                'course.institution',
                 'studentProfile.user',
-                'gradebook'
+                'gradebook',
             ]),
         ]);
     }
@@ -96,6 +104,7 @@ class CertificateController extends Controller
     {
         $validated = $request->validate([
             'status' => ['nullable', 'in:pending,issued,revoked'],
+            'verification_status' => ['nullable', 'in:valid,revoked,expired'],
             'remarks' => ['nullable', 'string'],
         ]);
 
@@ -104,9 +113,9 @@ class CertificateController extends Controller
         return response()->json([
             'message' => 'Certificate updated successfully.',
             'data' => $certificate->fresh()->load([
-                'course',
+                'course.institution',
                 'studentProfile.user',
-                'gradebook'
+                'gradebook',
             ]),
         ]);
     }
@@ -131,9 +140,9 @@ class CertificateController extends Controller
         return response()->json([
             'message' => 'Certificate PDF generated successfully.',
             'data' => $certificate->fresh()->load([
-                'course',
+                'course.institution',
                 'studentProfile.user',
-                'gradebook'
+                'gradebook',
             ]),
         ]);
     }
@@ -148,12 +157,53 @@ class CertificateController extends Controller
         return Storage::disk('public')->download($certificate->certificate_file);
     }
 
+    public function verify(string $token): JsonResponse
+    {
+        $certificate = Certificate::with([
+            'course.institution',
+            'studentProfile.user',
+            'gradebook',
+        ])
+            ->where('verification_token', $token)
+            ->first();
+
+        if (!$certificate) {
+            return response()->json([
+                'message' => 'Certificate not found.',
+                'valid' => false,
+            ], 404);
+        }
+
+        if ($certificate->verification_status !== 'valid' || $certificate->status !== 'issued') {
+            return response()->json([
+                'message' => 'Certificate is not valid.',
+                'valid' => false,
+                'status' => $certificate->verification_status,
+            ], 422);
+        }
+
+        return response()->json([
+            'message' => 'Certificate verified successfully.',
+            'valid' => true,
+            'data' => [
+                'certificate_number' => $certificate->certificate_number,
+                'verification_token' => $certificate->verification_token,
+                'student_name' => $certificate->studentProfile->user->name ?? null,
+                'course_title' => $certificate->course->title ?? null,
+                'institution_name' => $certificate->course->institution->name ?? null,
+                'final_percentage' => $certificate->final_percentage,
+                'final_grade' => $certificate->final_grade,
+                'issued_date' => optional($certificate->issued_date)->format('Y-m-d'),
+            ],
+        ]);
+    }
+
     private function generateCertificatePdf(Certificate $certificate): void
     {
         $certificate->load([
             'course.institution',
             'studentProfile.user',
-            'gradebook'
+            'gradebook',
         ]);
 
         $setting = null;
@@ -164,12 +214,27 @@ class CertificateController extends Controller
                 ->first();
         }
 
+        $verificationUrl = $setting?->verification_url
+            ? rtrim($setting->verification_url, '/') . '/' . $certificate->verification_token
+            : url('/api/verify-certificate/' . $certificate->verification_token);
+
+        $qrCodeSvg = null;
+
+        if ($setting?->show_qr_code ?? true) {
+            $qrCodeSvg = QrCode::format('svg')
+                ->size(120)
+                ->margin(1)
+                ->generate($verificationUrl);
+        }
+
         $fileName = 'certificate-' . $certificate->certificate_number . '.pdf';
         $filePath = 'certificates/' . $fileName;
 
         $pdf = Pdf::loadView('certificates.template', [
             'certificate' => $certificate,
             'setting' => $setting,
+            'verificationUrl' => $verificationUrl,
+            'qrCodeSvg' => $qrCodeSvg,
         ])->setPaper('a4', 'landscape');
 
         Storage::disk('public')->put($filePath, $pdf->output());

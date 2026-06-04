@@ -14,10 +14,13 @@ class Certificate extends Model
         'student_profile_id',
         'gradebook_id',
         'certificate_number',
+        'certificate_uuid',
+        'verification_token',
         'issued_date',
         'final_percentage',
         'final_grade',
         'status',
+        'verification_status',
         'certificate_file',
         'remarks',
     ];
@@ -29,12 +32,20 @@ class Certificate extends Model
 
     protected $appends = [
         'certificate_file_url',
+        'public_verification_url',
     ];
 
     public function getCertificateFileUrlAttribute(): ?string
     {
         return $this->certificate_file
             ? asset('storage/' . $this->certificate_file)
+            : null;
+    }
+
+    public function getPublicVerificationUrlAttribute(): ?string
+    {
+        return $this->verification_token
+            ? url('/api/verify-certificate/' . $this->verification_token)
             : null;
     }
 

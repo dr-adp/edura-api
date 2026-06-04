@@ -43,6 +43,7 @@ Route::get('/health', function () {
 
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
+Route::get('/verify-certificate/{token}', [CertificateController::class, 'verify']);
 
 Route::middleware(['auth:sanctum'])->group(function () {
 

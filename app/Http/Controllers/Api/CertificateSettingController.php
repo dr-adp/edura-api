@@ -30,18 +30,31 @@ class CertificateSettingController extends Controller
             'certificate_subtitle' => ['nullable', 'string', 'max:255'],
             'authorized_person_name' => ['nullable', 'string', 'max:255'],
             'authorized_person_designation' => ['nullable', 'string', 'max:255'],
+            'secondary_signatory_name' => ['nullable', 'string', 'max:255'],
+            'secondary_signatory_designation' => ['nullable', 'string', 'max:255'],
+            'verification_url' => ['nullable', 'string', 'max:1000'],
+            'show_qr_code' => ['nullable', 'boolean'],
             'footer_text' => ['nullable', 'string'],
             'logo' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
+            'institution_seal' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
+            'certificate_background' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:4096'],
             'signature_image' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
+            'secondary_signature_image' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
             'status' => ['nullable', 'in:active,inactive'],
         ]);
 
-        if ($request->hasFile('logo')) {
-            $validated['logo'] = $request->file('logo')->store('certificate-settings/logos', 'public');
-        }
-
-        if ($request->hasFile('signature_image')) {
-            $validated['signature_image'] = $request->file('signature_image')->store('certificate-settings/signatures', 'public');
+        foreach (
+            [
+                'logo' => 'certificate-settings/logos',
+                'institution_seal' => 'certificate-settings/seals',
+                'certificate_background' => 'certificate-settings/backgrounds',
+                'signature_image' => 'certificate-settings/signatures',
+                'secondary_signature_image' => 'certificate-settings/signatures',
+            ] as $field => $path
+        ) {
+            if ($request->hasFile($field)) {
+                $validated[$field] = $request->file($field)->store($path, 'public');
+            }
         }
 
         $setting = CertificateSetting::create($validated);
@@ -67,26 +80,35 @@ class CertificateSettingController extends Controller
             'certificate_subtitle' => ['nullable', 'string', 'max:255'],
             'authorized_person_name' => ['nullable', 'string', 'max:255'],
             'authorized_person_designation' => ['nullable', 'string', 'max:255'],
+            'secondary_signatory_name' => ['nullable', 'string', 'max:255'],
+            'secondary_signatory_designation' => ['nullable', 'string', 'max:255'],
+            'verification_url' => ['nullable', 'string', 'max:1000'],
+            'show_qr_code' => ['nullable', 'boolean'],
             'footer_text' => ['nullable', 'string'],
             'logo' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
+            'institution_seal' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
+            'certificate_background' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:4096'],
             'signature_image' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
+            'secondary_signature_image' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
             'status' => ['nullable', 'in:active,inactive'],
         ]);
 
-        if ($request->hasFile('logo')) {
-            if ($certificateSetting->logo && Storage::disk('public')->exists($certificateSetting->logo)) {
-                Storage::disk('public')->delete($certificateSetting->logo);
+        foreach (
+            [
+                'logo' => 'certificate-settings/logos',
+                'institution_seal' => 'certificate-settings/seals',
+                'certificate_background' => 'certificate-settings/backgrounds',
+                'signature_image' => 'certificate-settings/signatures',
+                'secondary_signature_image' => 'certificate-settings/signatures',
+            ] as $field => $path
+        ) {
+            if ($request->hasFile($field)) {
+                if ($certificateSetting->{$field} && Storage::disk('public')->exists($certificateSetting->{$field})) {
+                    Storage::disk('public')->delete($certificateSetting->{$field});
+                }
+
+                $validated[$field] = $request->file($field)->store($path, 'public');
             }
-
-            $validated['logo'] = $request->file('logo')->store('certificate-settings/logos', 'public');
-        }
-
-        if ($request->hasFile('signature_image')) {
-            if ($certificateSetting->signature_image && Storage::disk('public')->exists($certificateSetting->signature_image)) {
-                Storage::disk('public')->delete($certificateSetting->signature_image);
-            }
-
-            $validated['signature_image'] = $request->file('signature_image')->store('certificate-settings/signatures', 'public');
         }
 
         $certificateSetting->update($validated);
@@ -99,12 +121,18 @@ class CertificateSettingController extends Controller
 
     public function destroy(CertificateSetting $certificateSetting): JsonResponse
     {
-        if ($certificateSetting->logo && Storage::disk('public')->exists($certificateSetting->logo)) {
-            Storage::disk('public')->delete($certificateSetting->logo);
-        }
-
-        if ($certificateSetting->signature_image && Storage::disk('public')->exists($certificateSetting->signature_image)) {
-            Storage::disk('public')->delete($certificateSetting->signature_image);
+        foreach (
+            [
+                'logo',
+                'institution_seal',
+                'certificate_background',
+                'signature_image',
+                'secondary_signature_image',
+            ] as $field
+        ) {
+            if ($certificateSetting->{$field} && Storage::disk('public')->exists($certificateSetting->{$field})) {
+                Storage::disk('public')->delete($certificateSetting->{$field});
+            }
         }
 
         $certificateSetting->delete();

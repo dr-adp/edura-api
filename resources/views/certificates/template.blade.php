@@ -1,54 +1,35 @@
 <!DOCTYPE html>
+
 <html>
 
 <head>
     <meta charset="utf-8">
     <title>Certificate</title>
 
+
     <style>
         @page {
-            margin: 0;
             size: A4 landscape;
-        }
-
-        * {
-            box-sizing: border-box;
+            margin: 12mm;
         }
 
         body {
+            font-family: DejaVu Sans, sans-serif;
             margin: 0;
             padding: 0;
-            font-family: DejaVu Sans, sans-serif;
             color: #111827;
-        }
-
-        .page {
-            width: 100%;
-            height: 100%;
-            padding: 25px;
-            background-color: #f8fafc;
-
-            @if (!empty($setting?->certificate_background))
-                background-image: url("{{ public_path('storage/' . $setting->certificate_background) }}");
-                background-size: cover;
-                background-position: center;
-                background-repeat: no-repeat;
-            @endif
+            font-size: 12px;
         }
 
         .certificate {
             width: 100%;
-            min-height: 740px;
-            border: 6px solid #111827;
-            background: rgba(255, 255, 255, 0.96);
-            padding: 18px;
+            border: 4px solid #111827;
+            padding: 12px;
         }
 
         .inner-border {
-            width: 100%;
-            min-height: 700px;
             border: 2px solid #c9a227;
-            padding: 25px;
+            padding: 15px;
         }
 
         table {
@@ -56,91 +37,82 @@
             border-collapse: collapse;
         }
 
-        .header-table td {
+        .header td {
             vertical-align: middle;
         }
 
         .logo {
-            max-height: 80px;
-            max-width: 150px;
+            max-height: 60px;
+            max-width: 120px;
         }
 
-        .institution-name {
+        .institution {
             text-align: center;
-            font-size: 26px;
+            font-size: 24px;
             font-weight: bold;
-            color: #111827;
-            letter-spacing: 1px;
         }
 
-        .certificate-number {
+        .certificate-no {
             text-align: right;
-            font-size: 11px;
-            color: #374151;
+            font-size: 10px;
         }
 
         .title {
             text-align: center;
-            font-size: 40px;
+            font-size: 32px;
             font-weight: bold;
-            margin-top: 30px;
-            color: #111827;
-            letter-spacing: 2px;
+            margin-top: 10px;
+            margin-bottom: 5px;
         }
 
         .subtitle {
             text-align: center;
-            font-size: 16px;
-            margin-top: 15px;
-            color: #4b5563;
+            font-size: 14px;
+            margin-bottom: 10px;
         }
 
         .student-name {
             text-align: center;
-            font-size: 34px;
+            font-size: 30px;
             font-weight: bold;
-            margin-top: 20px;
             color: #0f172a;
+            margin-top: 10px;
+            margin-bottom: 5px;
         }
 
         .student-line {
-            width: 60%;
-            margin: 10px auto;
+            width: 55%;
+            margin: 0 auto 10px auto;
             border-top: 1px solid #9ca3af;
         }
 
         .course-label {
             text-align: center;
-            margin-top: 15px;
-            font-size: 15px;
-            color: #4b5563;
+            font-size: 14px;
         }
 
         .course-name {
             text-align: center;
-            font-size: 24px;
+            font-size: 22px;
             font-weight: bold;
-            margin-top: 10px;
-            color: #111827;
+            margin-top: 5px;
         }
 
         .details {
             text-align: center;
-            margin-top: 20px;
-            font-size: 12px;
-            line-height: 1.8;
-            color: #374151;
+            font-size: 11px;
+            margin-top: 10px;
+            line-height: 1.5;
         }
 
         .seal-section {
             text-align: center;
-            margin-top: 25px;
-            margin-bottom: 25px;
+            margin-top: 12px;
+            margin-bottom: 12px;
         }
 
         .seal-image {
-            max-height: 90px;
-            max-width: 90px;
+            height: 70px;
         }
 
         .signature-table {
@@ -154,240 +126,205 @@
         }
 
         .signature-image {
-            max-height: 55px;
-            max-width: 170px;
+            max-height: 45px;
+            max-width: 140px;
         }
 
         .signature-line {
-            width: 180px;
+            width: 150px;
             border-top: 1px solid #111827;
-            margin: 5px auto;
+            margin: 4px auto;
         }
 
-        .signatory-name {
-            font-size: 12px;
+        .sign-name {
+            font-size: 11px;
             font-weight: bold;
         }
 
-        .signatory-designation {
-            font-size: 11px;
-            color: #4b5563;
+        .sign-designation {
+            font-size: 10px;
         }
 
         .qr svg {
-            width: 80px;
-            height: 80px;
+            width: 70px;
+            height: 70px;
         }
 
         .qr-text {
-            font-size: 10px;
-            color: #4b5563;
-            margin-top: 4px;
+            font-size: 9px;
         }
 
         .footer {
             text-align: center;
-            margin-top: 25px;
-            font-size: 10px;
+            margin-top: 10px;
+            font-size: 9px;
+            line-height: 1.4;
             color: #6b7280;
-            line-height: 1.6;
-        }
-
-        .footer hr {
-            border: none;
-            border-top: 1px solid #d1d5db;
-            margin-bottom: 10px;
         }
     </style>
+
+
 </head>
 
 <body>
 
-    <div class="page">
 
-        <div class="certificate">
+    <div class="certificate">
 
-            <div class="inner-border">
+        <div class="inner-border">
 
-                {{-- HEADER --}}
-                <table class="header-table">
-                    <tr>
+            <table class="header">
+                <tr>
 
-                        <td width="20%">
-                            @if (!empty($setting?->logo))
-                                <img class="logo" src="{{ public_path('storage/' . $setting->logo) }}">
-                            @elseif(!empty($certificate->course?->institution?->logo))
-                                <img class="logo"
-                                    src="{{ public_path('storage/' . $certificate->course->institution->logo) }}">
-                            @endif
-                        </td>
+                    <td width="20%">
+                        @if (!empty($setting?->logo))
+                            <img class="logo" src="{{ public_path('storage/' . $setting->logo) }}">
+                        @elseif(!empty($certificate->course?->institution?->logo))
+                            <img class="logo"
+                                src="{{ public_path('storage/' . $certificate->course->institution->logo) }}">
+                        @endif
+                    </td>
 
-                        <td width="60%">
-                            <div class="institution-name">
-                                {{ $certificate->course->institution->name ?? 'AGHORI EDURA' }}
-                            </div>
-                        </td>
+                    <td width="60%">
+                        <div class="institution">
+                            {{ $certificate->course->institution->name ?? 'AGHORI EDURA' }}
+                        </div>
+                    </td>
 
-                        <td width="20%">
-                            <div class="certificate-number">
-                                Certificate No.<br>
-                                <strong>{{ $certificate->certificate_number }}</strong>
-                            </div>
-                        </td>
+                    <td width="20%">
+                        <div class="certificate-no">
+                            Certificate No.<br>
+                            <strong>{{ $certificate->certificate_number }}</strong>
+                        </div>
+                    </td>
 
-                    </tr>
-                </table>
+                </tr>
+            </table>
 
-                {{-- TITLE --}}
-                <div class="title">
-                    {{ $setting->certificate_title ?? 'CERTIFICATE OF COMPLETION' }}
+            <div class="title">
+                {{ $setting->certificate_title ?? 'Certificate of Completion' }}
+            </div>
+
+            <div class="subtitle">
+                {{ $setting->certificate_subtitle ?? 'This certificate is awarded to' }}
+            </div>
+
+            <div class="student-name">
+                {{ $certificate->studentProfile->user->name ?? 'Student Name' }}
+            </div>
+
+            <div class="student-line"></div>
+
+            <div class="course-label">
+                For successfully completing the course
+            </div>
+
+            <div class="course-name">
+                {{ $certificate->course->title ?? 'Course Name' }}
+            </div>
+
+            <div class="details">
+                Final Percentage:
+                <strong>{{ $certificate->final_percentage }}%</strong>
+
+                &nbsp; | &nbsp;
+
+                Final Grade:
+                <strong>{{ $certificate->final_grade }}</strong>
+
+                &nbsp; | &nbsp;
+
+                Issued Date:
+                <strong>{{ optional($certificate->issued_date)->format('d M Y') }}</strong>
+            </div>
+
+            @if (!empty($setting?->institution_seal))
+                <div class="seal-section">
+                    <img class="seal-image" src="{{ public_path('storage/' . $setting->institution_seal) }}">
                 </div>
+            @endif
 
-                <div class="subtitle">
-                    {{ $setting->certificate_subtitle ?? 'This certificate is proudly presented to' }}
-                </div>
+            <table class="signature-table">
+                <tr>
 
-                {{-- STUDENT --}}
-                <div class="student-name">
-                    {{ $certificate->studentProfile->user->name ?? 'Student Name' }}
-                </div>
+                    <td>
 
-                <div class="student-line"></div>
+                        @if (!empty($setting?->signature_image))
+                            <img class="signature-image"
+                                src="{{ public_path('storage/' . $setting->signature_image) }}">
+                        @endif
 
-                {{-- COURSE --}}
-                <div class="course-label">
-                    For successfully completing the course
-                </div>
+                        <div class="signature-line"></div>
 
-                <div class="course-name">
-                    {{ $certificate->course->title ?? 'Course Name' }}
-                </div>
+                        <div class="sign-name">
+                            {{ $setting->authorized_person_name }}
+                        </div>
 
-                {{-- DETAILS --}}
-                <div class="details">
+                        <div class="sign-designation">
+                            {{ $setting->authorized_person_designation }}
+                        </div>
 
-                    Final Percentage:
-                    <strong>{{ $certificate->final_percentage }}%</strong>
+                    </td>
 
-                    &nbsp;&nbsp;|&nbsp;&nbsp;
+                    <td>
 
-                    Final Grade:
-                    <strong>{{ $certificate->final_grade }}</strong>
+                        <div style="font-size:11px;font-weight:bold;">
+                            VERIFIED CERTIFICATE
+                        </div>
 
-                    &nbsp;&nbsp;|&nbsp;&nbsp;
+                        <div style="font-size:9px;margin-top:5px;">
+                            Verification Token
+                        </div>
 
-                    Issued Date:
-                    <strong>
-                        {{ optional($certificate->issued_date)->format('d M Y') }}
-                    </strong>
+                        <div style="font-size:10px;">
+                            {{ $certificate->verification_token }}
+                        </div>
 
+                    </td>
+
+                    <td>
+
+                        @if (!empty($setting?->secondary_signature_image))
+                            <img class="signature-image"
+                                src="{{ public_path('storage/' . $setting->secondary_signature_image) }}">
+                        @endif
+
+                        <div class="signature-line"></div>
+
+                        <div class="sign-name">
+                            {{ $setting->secondary_signatory_name }}
+                        </div>
+
+                        <div class="sign-designation">
+                            {{ $setting->secondary_signatory_designation }}
+                        </div>
+
+                    </td>
+
+                </tr>
+            </table>
+
+            <div class="footer">
+
+                Certificate UUID:
+                {{ $certificate->certificate_uuid }}
+
+                <br>
+
+                Verification Status:
+                {{ $certificate->verification_status }}
+
+                @if (!empty($setting?->footer_text))
                     <br>
-
-                    Verification Token:
-                    <strong>{{ $certificate->verification_token }}</strong>
-
-                </div>
-
-                {{-- SEAL --}}
-                @if (!empty($setting?->institution_seal))
-                    <div class="seal-section">
-                        <img class="seal-image" src="{{ public_path('storage/' . $setting->institution_seal) }}">
-                    </div>
+                    {{ $setting->footer_text }}
                 @endif
-
-                {{-- SIGNATURES + QR --}}
-                <table class="signature-table">
-
-                    <tr>
-
-                        <td>
-
-                            @if (!empty($setting?->signature_image))
-                                <img class="signature-image"
-                                    src="{{ public_path('storage/' . $setting->signature_image) }}">
-                            @endif
-
-                            <div class="signature-line"></div>
-
-                            <div class="signatory-name">
-                                {{ $setting->authorized_person_name ?? 'Authorized Signatory' }}
-                            </div>
-
-                            <div class="signatory-designation">
-                                {{ $setting->authorized_person_designation ?? 'Institution Representative' }}
-                            </div>
-
-                        </td>
-
-                        <td>
-
-                            @if (($setting?->show_qr_code ?? true) && !empty($qrCodeSvg))
-                                <div class="qr">
-                                    {!! $qrCodeSvg !!}
-                                </div>
-
-                                <div class="qr-text">
-                                    Scan QR Code to Verify
-                                </div>
-                            @endif
-
-                        </td>
-
-                        <td>
-
-                            @if (!empty($setting?->secondary_signature_image))
-                                <img class="signature-image"
-                                    src="{{ public_path('storage/' . $setting->secondary_signature_image) }}">
-                            @endif
-
-                            <div class="signature-line"></div>
-
-                            <div class="signatory-name">
-                                {{ $setting->secondary_signatory_name ?? 'Academic Head' }}
-                            </div>
-
-                            <div class="signatory-designation">
-                                {{ $setting->secondary_signatory_designation ?? 'Verifier' }}
-                            </div>
-
-                        </td>
-
-                    </tr>
-
-                </table>
-
-                {{-- FOOTER --}}
-                <div class="footer">
-
-                    <hr>
-
-                    Certificate UUID:
-                    {{ $certificate->certificate_uuid }}
-
-                    <br>
-
-                    Verification Status:
-                    {{ $certificate->verification_status }}
-
-                    <br>
-
-                    @if (!empty($setting?->verification_url))
-                        Verify Online:
-                        {{ $setting->verification_url }}
-                    @endif
-
-                    @if (!empty($setting?->footer_text))
-                        <br>
-                        {{ $setting->footer_text }}
-                    @endif
-
-                </div>
 
             </div>
 
         </div>
 
     </div>
+
 
 </body>
 

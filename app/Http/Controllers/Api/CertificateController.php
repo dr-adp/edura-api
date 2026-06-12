@@ -11,7 +11,6 @@ use App\Http\Controllers\Controller;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Barryvdh\DomPDF\Facade\Pdf;
-use SimpleSoftwareIO\QrCode\Facades\QrCode;
 
 class CertificateController extends Controller
 {
@@ -218,15 +217,6 @@ class CertificateController extends Controller
             ? rtrim($setting->verification_url, '/') . '/' . $certificate->verification_token
             : url('/api/verify-certificate/' . $certificate->verification_token);
 
-        $qrCodeSvg = null;
-
-        if ($setting?->show_qr_code ?? true) {
-            $qrCodeSvg = QrCode::format('svg')
-                ->size(120)
-                ->margin(1)
-                ->generate($verificationUrl);
-        }
-
         $fileName = 'certificate-' . $certificate->certificate_number . '.pdf';
         $filePath = 'certificates/' . $fileName;
 
@@ -234,7 +224,7 @@ class CertificateController extends Controller
             'certificate' => $certificate,
             'setting' => $setting,
             'verificationUrl' => $verificationUrl,
-            'qrCodeSvg' => $qrCodeSvg,
+            
         ])->setPaper('a4', 'landscape');
 
         Storage::disk('public')->put($filePath, $pdf->output());

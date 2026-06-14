@@ -34,6 +34,12 @@ use App\Http\Controllers\Api\TeacherProfileController;
 use App\Http\Controllers\Api\UploadController;
 use Illuminate\Support\Facades\Route;
 
+/*
+|--------------------------------------------------------------------------
+| Public Routes
+|--------------------------------------------------------------------------
+*/
+
 Route::get('/health', function () {
     return response()->json([
         'status' => 'ok',
@@ -44,70 +50,283 @@ Route::get('/health', function () {
 
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login', [AuthController::class, 'login']);
-Route::get('/verify-certificate/{token}', [CertificateController::class, 'verify']);
+
+Route::get(
+    '/verify-certificate/{token}',
+    [CertificateController::class, 'verify']
+);
+
+/*
+|--------------------------------------------------------------------------
+| Protected Routes
+|--------------------------------------------------------------------------
+*/
 
 Route::middleware(['auth:sanctum'])->group(function () {
 
     Route::get('/me', [AuthController::class, 'me']);
     Route::post('/logout', [AuthController::class, 'logout']);
 
-    Route::post('/upload/profile-photo', [UploadController::class, 'uploadProfilePhoto']);
+    Route::post(
+        '/upload/profile-photo',
+        [UploadController::class, 'uploadProfilePhoto']
+    );
+
+    /*
+    |--------------------------------------------------------------------------
+    | Super Admin
+    |--------------------------------------------------------------------------
+    */
 
     Route::middleware(['role:super-admin'])->group(function () {
+
         Route::apiResource('institutions', InstitutionController::class);
-        Route::apiResource('subscription-plans', SubscriptionPlanController::class);
-        Route::apiResource('institution-subscriptions', InstitutionSubscriptionController::class);
-        Route::post('/institutions/{institution}/upload-logo', [UploadController::class, 'uploadInstitutionLogo']);
+
+        Route::apiResource(
+            'subscription-plans',
+            SubscriptionPlanController::class
+        );
+
+        Route::apiResource(
+            'institution-subscriptions',
+            InstitutionSubscriptionController::class
+        );
+
+        Route::post(
+            '/institutions/{institution}/upload-logo',
+            [UploadController::class, 'uploadInstitutionLogo']
+        );
     });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Institution Admin
+    |--------------------------------------------------------------------------
+    */
 
     Route::middleware(['role:super-admin|institution-admin'])->group(function () {
+
         Route::apiResource('departments', DepartmentController::class);
         Route::apiResource('batches', BatchController::class);
-        Route::apiResource('institution-users', InstitutionUserController::class);
-        Route::apiResource('teacher-profiles', TeacherProfileController::class);
-        Route::apiResource('student-profiles', StudentProfileController::class);
-        Route::apiResource('parent-profiles', ParentProfileController::class);
-        Route::apiResource('course-enrollments', CourseEnrollmentController::class);
+
+        Route::apiResource(
+            'institution-users',
+            InstitutionUserController::class
+        );
+
+        Route::apiResource(
+            'teacher-profiles',
+            TeacherProfileController::class
+        );
+
+        Route::apiResource(
+            'student-profiles',
+            StudentProfileController::class
+        );
+
+        Route::apiResource(
+            'parent-profiles',
+            ParentProfileController::class
+        );
+
+        Route::apiResource(
+            'course-enrollments',
+            CourseEnrollmentController::class
+        );
     });
 
-    Route::middleware(['role:super-admin|institution-admin|teacher'])->group(function () {
+    /*
+    |--------------------------------------------------------------------------
+    | Teachers
+    |--------------------------------------------------------------------------
+    */
+
+    Route::middleware([
+        'role:super-admin|institution-admin|teacher'
+    ])->group(function () {
+
         Route::apiResource('courses', CourseController::class);
         Route::apiResource('course-sections', CourseSectionController::class);
+
         Route::apiResource('lessons', LessonController::class);
-        Route::apiResource('lesson-resources', LessonResourceController::class);
 
-        Route::apiResource('live-classes', LiveClassController::class);
-        Route::apiResource('live-class-attendances', LiveClassAttendanceController::class);
-        Route::get('/attendance-reports', [AttendanceRecordController::class, 'report']);
-        Route::post('/attendance-records/bulk', [AttendanceRecordController::class, 'bulkStore']);
-        Route::apiResource('attendance-records', AttendanceRecordController::class);
+        Route::apiResource(
+            'lesson-resources',
+            LessonResourceController::class
+        );
 
-        Route::apiResource('assignments', AssignmentController::class);
-        Route::apiResource('assignment-evaluations', AssignmentEvaluationController::class);
+        /*
+        |--------------------------------------------------------------------------
+        | Live Classes
+        |--------------------------------------------------------------------------
+        */
 
-        Route::apiResource('question-banks', QuestionBankController::class);
-        Route::apiResource('question-options', QuestionOptionController::class);
-        Route::apiResource('quizzes', QuizController::class);
-        Route::apiResource('quiz-questions', QuizQuestionController::class);
+        Route::apiResource(
+            'live-classes',
+            LiveClassController::class
+        );
 
-        Route::post('/gradebooks/recalculate', [GradebookController::class, 'recalculate']);
-        Route::apiResource('gradebooks', GradebookController::class);
+        Route::apiResource(
+            'live-class-attendances',
+            LiveClassAttendanceController::class
+        );
 
-        Route::post('/certificates/{certificate}/generate', [CertificateController::class, 'generate']);
-        Route::get('/certificates/{certificate}/download', [CertificateController::class, 'download']);
-        Route::apiResource('certificates', CertificateController::class);
-        Route::apiResource('certificate-settings', CertificateSettingController::class);
+        /*
+        |--------------------------------------------------------------------------
+        | Attendance Module
+        |--------------------------------------------------------------------------
+        */
+
+        Route::get(
+            '/attendance-reports',
+            [AttendanceRecordController::class, 'report']
+        );
+
+        Route::post(
+            '/attendance-records/bulk',
+            [AttendanceRecordController::class, 'bulkStore']
+        );
+
+        Route::apiResource(
+            'attendance-records',
+            AttendanceRecordController::class
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | Assignments
+        |--------------------------------------------------------------------------
+        */
+
+        Route::apiResource(
+            'assignments',
+            AssignmentController::class
+        );
+
+        Route::apiResource(
+            'assignment-evaluations',
+            AssignmentEvaluationController::class
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | Quiz Module
+        |--------------------------------------------------------------------------
+        */
+
+        Route::apiResource(
+            'question-banks',
+            QuestionBankController::class
+        );
+
+        Route::apiResource(
+            'question-options',
+            QuestionOptionController::class
+        );
+
+        Route::apiResource(
+            'quizzes',
+            QuizController::class
+        );
+
+        Route::apiResource(
+            'quiz-questions',
+            QuizQuestionController::class
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | Gradebook
+        |--------------------------------------------------------------------------
+        */
+
+        Route::post(
+            '/gradebooks/recalculate',
+            [GradebookController::class, 'recalculate']
+        );
+
+        Route::apiResource(
+            'gradebooks',
+            GradebookController::class
+        );
+
+        /*
+        |--------------------------------------------------------------------------
+        | Certificates
+        |--------------------------------------------------------------------------
+        */
+
+        Route::post(
+            '/certificates/{certificate}/generate',
+            [CertificateController::class, 'generate']
+        );
+
+        Route::get(
+            '/certificates/{certificate}/download',
+            [CertificateController::class, 'download']
+        );
+
+        Route::apiResource(
+            'certificates',
+            CertificateController::class
+        );
+
+        Route::apiResource(
+            'certificate-settings',
+            CertificateSettingController::class
+        );
     });
 
-    Route::middleware(['role:super-admin|institution-admin|teacher|student'])->group(function () {
-        Route::apiResource('lesson-progress', LessonProgressController::class);
-        Route::apiResource('assignment-submissions', AssignmentSubmissionController::class);
-        Route::apiResource('quiz-attempts', QuizAttemptController::class);
-        Route::apiResource('quiz-answers', QuizAnswerController::class);
+    /*
+    |--------------------------------------------------------------------------
+    | Student Access
+    |--------------------------------------------------------------------------
+    */
+
+    Route::middleware([
+        'role:super-admin|institution-admin|teacher|student'
+    ])->group(function () {
+
+        Route::apiResource(
+            'lesson-progress',
+            LessonProgressController::class
+        );
+
+        Route::apiResource(
+            'assignment-submissions',
+            AssignmentSubmissionController::class
+        );
+
+        Route::apiResource(
+            'quiz-attempts',
+            QuizAttemptController::class
+        );
+
+        Route::apiResource(
+            'quiz-answers',
+            QuizAnswerController::class
+        );
     });
 
-    Route::middleware(['role:super-admin|institution-admin|teacher|student|parent'])->group(function () {
-        Route::get('/my-gradebooks', [GradebookController::class, 'index']);
-        Route::get('/my-certificates', [CertificateController::class, 'index']);
+    /*
+    |--------------------------------------------------------------------------
+    | Common Access
+    |--------------------------------------------------------------------------
+    */
+
+    Route::middleware([
+        'role:super-admin|institution-admin|teacher|student|parent'
+    ])->group(function () {
+
+        Route::get(
+            '/my-gradebooks',
+            [GradebookController::class, 'index']
+        );
+
+        Route::get(
+            '/my-certificates',
+            [CertificateController::class, 'index']
+        );
     });
 });
+

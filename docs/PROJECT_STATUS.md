@@ -74,17 +74,23 @@ Technology Stack:
 * QR Verification Architecture
 * Certificate Settings
 
+### Attendance Management
+
+* Attendance Records
+* Bulk Attendance Marking
+* Attendance Reports
+
 ---
 
 ## Current Phase
 
-Certificate Template V3
+Parent Dashboard
 
 ---
 
 ## Next Phase
 
-Attendance Management
+Report Cards
 
 ---
 
@@ -93,4 +99,3 @@ Attendance Management
 e5d32d5
 
 Add certificate branding assets and verification enhancements
-

@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 
 class Course extends Model
 {
@@ -42,7 +42,7 @@ class Course extends Model
     public function getThumbnailUrlAttribute(): ?string
     {
         return $this->thumbnail
-            ? asset('storage/' . $this->thumbnail)
+            ? asset('storage/'.$this->thumbnail)
             : null;
     }
 
@@ -65,6 +65,7 @@ class Course extends Model
     {
         return $this->belongsTo(TeacherProfile::class);
     }
+
     public function sections()
     {
         return $this->hasMany(CourseSection::class)
@@ -76,13 +77,20 @@ class Course extends Model
         return $this->hasMany(Lesson::class)
             ->orderBy('sort_order');
     }
+
     public function enrollments()
     {
         return $this->hasMany(CourseEnrollment::class);
     }
+
     public function liveClasses()
     {
         return $this->hasMany(LiveClass::class);
+    }
+
+    public function attendanceRecords()
+    {
+        return $this->hasMany(AttendanceRecord::class);
     }
 
     public function assignments()

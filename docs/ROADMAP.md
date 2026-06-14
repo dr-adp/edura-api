@@ -2,7 +2,9 @@
 
 ## Immediate Tasks
 
-### 1. Certificate Template V3
+### Completed
+
+#### Certificate Template V3
 
 Requirements:
 
@@ -14,18 +16,20 @@ Requirements:
 * QR Verification
 * Professional Certificate Design
 
-### 2. Attendance Management
+#### Attendance Management
 
 * Attendance Records
 * Attendance Reports
 
-### 3. Parent Dashboard
+### Next
+
+#### Parent Dashboard
 
 * Attendance
 * Grades
 * Certificates
 
-### 4. Report Cards
+#### Report Cards
 
 * Student Academic Reports
 
@@ -49,4 +53,3 @@ Requirements:
 
 * Performance Analytics
 * Student Weakness Detection
-

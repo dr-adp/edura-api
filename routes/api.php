@@ -1,37 +1,38 @@
 <?php
 
-use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\AssignmentController;
+use App\Http\Controllers\Api\AssignmentEvaluationController;
+use App\Http\Controllers\Api\AssignmentSubmissionController;
+use App\Http\Controllers\Api\AttendanceRecordController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BatchController;
-use App\Http\Controllers\Api\CourseController;
-use App\Http\Controllers\Api\UploadController;
-use App\Http\Controllers\Api\LessonController;
-use App\Http\Controllers\Api\QuizController;
-use App\Http\Controllers\Api\QuizAnswerController;
-use App\Http\Controllers\Api\QuizAttemptController;
-use App\Http\Controllers\Api\QuizQuestionController;
-use App\Http\Controllers\Api\AssignmentController;
-use App\Http\Controllers\Api\DepartmentController;
-use App\Http\Controllers\Api\InstitutionController;
-use App\Http\Controllers\Api\QuestionBankController;
-use App\Http\Controllers\Api\QuestionOptionController;
-use App\Http\Controllers\Api\CourseSectionController;
-use App\Http\Controllers\Api\LessonProgressController;
-use App\Http\Controllers\Api\LessonResourceController;
-use App\Http\Controllers\Api\LiveClassController;
-use App\Http\Controllers\Api\LiveClassAttendanceController;
-use App\Http\Controllers\Api\CourseEnrollmentController;
-use App\Http\Controllers\Api\InstitutionUserController;
-use App\Http\Controllers\Api\ParentProfileController;
-use App\Http\Controllers\Api\StudentProfileController;
-use App\Http\Controllers\Api\TeacherProfileController;
-use App\Http\Controllers\Api\AssignmentSubmissionController;
-use App\Http\Controllers\Api\AssignmentEvaluationController;
-use App\Http\Controllers\Api\SubscriptionPlanController;
-use App\Http\Controllers\Api\InstitutionSubscriptionController;
-use App\Http\Controllers\Api\GradebookController;
 use App\Http\Controllers\Api\CertificateController;
 use App\Http\Controllers\Api\CertificateSettingController;
+use App\Http\Controllers\Api\CourseController;
+use App\Http\Controllers\Api\CourseEnrollmentController;
+use App\Http\Controllers\Api\CourseSectionController;
+use App\Http\Controllers\Api\DepartmentController;
+use App\Http\Controllers\Api\GradebookController;
+use App\Http\Controllers\Api\InstitutionController;
+use App\Http\Controllers\Api\InstitutionSubscriptionController;
+use App\Http\Controllers\Api\InstitutionUserController;
+use App\Http\Controllers\Api\LessonController;
+use App\Http\Controllers\Api\LessonProgressController;
+use App\Http\Controllers\Api\LessonResourceController;
+use App\Http\Controllers\Api\LiveClassAttendanceController;
+use App\Http\Controllers\Api\LiveClassController;
+use App\Http\Controllers\Api\ParentProfileController;
+use App\Http\Controllers\Api\QuestionBankController;
+use App\Http\Controllers\Api\QuestionOptionController;
+use App\Http\Controllers\Api\QuizAnswerController;
+use App\Http\Controllers\Api\QuizAttemptController;
+use App\Http\Controllers\Api\QuizController;
+use App\Http\Controllers\Api\QuizQuestionController;
+use App\Http\Controllers\Api\StudentProfileController;
+use App\Http\Controllers\Api\SubscriptionPlanController;
+use App\Http\Controllers\Api\TeacherProfileController;
+use App\Http\Controllers\Api\UploadController;
+use Illuminate\Support\Facades\Route;
 
 Route::get('/health', function () {
     return response()->json([
@@ -77,6 +78,9 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
         Route::apiResource('live-classes', LiveClassController::class);
         Route::apiResource('live-class-attendances', LiveClassAttendanceController::class);
+        Route::get('/attendance-reports', [AttendanceRecordController::class, 'report']);
+        Route::post('/attendance-records/bulk', [AttendanceRecordController::class, 'bulkStore']);
+        Route::apiResource('attendance-records', AttendanceRecordController::class);
 
         Route::apiResource('assignments', AssignmentController::class);
         Route::apiResource('assignment-evaluations', AssignmentEvaluationController::class);
@@ -88,7 +92,6 @@ Route::middleware(['auth:sanctum'])->group(function () {
 
         Route::post('/gradebooks/recalculate', [GradebookController::class, 'recalculate']);
         Route::apiResource('gradebooks', GradebookController::class);
-
 
         Route::post('/certificates/{certificate}/generate', [CertificateController::class, 'generate']);
         Route::get('/certificates/{certificate}/download', [CertificateController::class, 'download']);

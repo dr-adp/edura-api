@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 
 class Institution extends Model
 {
@@ -31,7 +31,7 @@ class Institution extends Model
     public function getLogoUrlAttribute(): ?string
     {
         return $this->logo
-            ? asset('storage/' . $this->logo)
+            ? asset('storage/'.$this->logo)
             : null;
     }
 
@@ -55,6 +55,11 @@ class Institution extends Model
     public function batches()
     {
         return $this->hasMany(Batch::class);
+    }
+
+    public function attendanceRecords()
+    {
+        return $this->hasMany(AttendanceRecord::class);
     }
 
     public function certificateSetting()

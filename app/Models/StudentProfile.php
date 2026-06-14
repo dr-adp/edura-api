@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 
 class StudentProfile extends Model
 {
@@ -47,6 +47,7 @@ class StudentProfile extends Model
     {
         return $this->belongsTo(Batch::class);
     }
+
     public function courseEnrollments()
     {
         return $this->hasMany(CourseEnrollment::class);
@@ -55,6 +56,11 @@ class StudentProfile extends Model
     public function liveClassAttendances()
     {
         return $this->hasMany(LiveClassAttendance::class);
+    }
+
+    public function attendanceRecords()
+    {
+        return $this->hasMany(AttendanceRecord::class);
     }
 
     public function assignmentSubmissions()

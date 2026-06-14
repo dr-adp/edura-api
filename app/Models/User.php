@@ -2,15 +2,15 @@
 
 namespace App\Models;
 
-use Spatie\Permission\Traits\HasRoles;
-use Laravel\Sanctum\HasApiTokens;
-use Illuminate\Notifications\Notifiable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+use Laravel\Sanctum\HasApiTokens;
+use Spatie\Permission\Traits\HasRoles;
 
 class User extends Authenticatable
 {
-    use HasApiTokens, HasFactory, Notifiable, HasRoles;
+    use HasApiTokens, HasFactory, HasRoles, Notifiable;
 
     protected $fillable = [
         'name',
@@ -40,12 +40,17 @@ class User extends Authenticatable
     public function getProfilePhotoUrlAttribute(): ?string
     {
         return $this->profile_photo
-            ? asset('storage/' . $this->profile_photo)
+            ? asset('storage/'.$this->profile_photo)
             : null;
     }
 
     public function role()
     {
         return $this->belongsTo(Role::class);
+    }
+
+    public function markedAttendanceRecords()
+    {
+        return $this->hasMany(AttendanceRecord::class, 'marked_by_id');
     }
 }

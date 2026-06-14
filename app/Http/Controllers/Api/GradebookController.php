@@ -10,6 +10,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use App\Models\AssignmentEvaluation;
 use App\Http\Controllers\Controller;
+use Illuminate\Validation\ValidationException;
 
 class GradebookController extends Controller
 {
@@ -133,8 +134,27 @@ class GradebookController extends Controller
 
     private function calculateGradebook(int $courseId, int $studentProfileId): Gradebook
     {
-        Course::findOrFail($courseId);
-        StudentProfile::findOrFail($studentProfileId);
+        $course = Course::findOrFail($courseId);
+        $student = StudentProfile::findOrFail($studentProfileId);
+
+        if ((int) $course->institution_id !== (int) $student->institution_id) {
+            throw ValidationException::withMessages([
+                'student_profile_id' =>
+                'Student and Course must belong to the same institution.',
+            ]);
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Data Consistency Check
+    |--------------------------------------------------------------------------
+    */
+        if ((int) $course->institution_id !== (int) $student->institution_id) {
+            throw ValidationException::withMessages([
+                'student_profile_id' =>
+                'Student and Course must belong to the same institution.',
+            ]);
+        }
 
         $assignmentEvaluations = AssignmentEvaluation::whereHas(
             'assignmentSubmission',

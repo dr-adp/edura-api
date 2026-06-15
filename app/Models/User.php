@@ -40,13 +40,33 @@ class User extends Authenticatable
     public function getProfilePhotoUrlAttribute(): ?string
     {
         return $this->profile_photo
-            ? asset('storage/'.$this->profile_photo)
+            ? asset('storage/' . $this->profile_photo)
             : null;
     }
 
     public function role()
     {
         return $this->belongsTo(Role::class);
+    }
+
+    public function teacherProfile()
+    {
+        return $this->hasOne(TeacherProfile::class);
+    }
+
+    public function studentProfile()
+    {
+        return $this->hasOne(StudentProfile::class);
+    }
+
+    public function parentProfile()
+    {
+        return $this->hasOne(ParentProfile::class);
+    }
+
+    public function institutionUsers()
+    {
+        return $this->hasMany(InstitutionUser::class);
     }
 
     public function markedAttendanceRecords()

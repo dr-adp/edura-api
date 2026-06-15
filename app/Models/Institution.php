@@ -31,7 +31,7 @@ class Institution extends Model
     public function getLogoUrlAttribute(): ?string
     {
         return $this->logo
-            ? asset('storage/'.$this->logo)
+            ? asset('storage/' . $this->logo)
             : null;
     }
 
@@ -57,9 +57,34 @@ class Institution extends Model
         return $this->hasMany(Batch::class);
     }
 
+    public function teachers()
+    {
+        return $this->hasMany(TeacherProfile::class);
+    }
+
+    public function students()
+    {
+        return $this->hasMany(StudentProfile::class);
+    }
+
+    public function parents()
+    {
+        return $this->hasMany(ParentProfile::class);
+    }
+
+    public function courses()
+    {
+        return $this->hasMany(Course::class);
+    }
+
     public function attendanceRecords()
     {
         return $this->hasMany(AttendanceRecord::class);
+    }
+
+    public function liveClasses()
+    {
+        return $this->hasMany(LiveClass::class);
     }
 
     public function certificateSetting()

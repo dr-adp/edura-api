@@ -82,4 +82,6 @@ class StudentProfile extends Model
     {
         return $this->hasMany(Certificate::class);
     }
+
+    
 }

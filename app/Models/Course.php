@@ -42,7 +42,7 @@ class Course extends Model
     public function getThumbnailUrlAttribute(): ?string
     {
         return $this->thumbnail
-            ? asset('storage/'.$this->thumbnail)
+            ? asset('storage/' . $this->thumbnail)
             : null;
     }
 
@@ -117,4 +117,15 @@ class Course extends Model
     {
         return $this->hasMany(Certificate::class);
     }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Future LMS Features
+    |--------------------------------------------------------------------------
+    */
+
+    /*public function reviews()
+    {
+        return $this->hasMany(CourseReview::class);
+    }*/
 }

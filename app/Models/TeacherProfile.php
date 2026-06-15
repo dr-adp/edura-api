@@ -41,4 +41,24 @@ class TeacherProfile extends Model
     {
         return $this->hasMany(AssignmentEvaluation::class);
     }
+
+    public function courses()
+    {
+        return $this->hasMany(Course::class);
+    }
+
+    public function assignments()
+    {
+        return $this->hasMany(Assignment::class);
+    }
+
+    public function quizzes()
+    {
+        return $this->hasMany(Quiz::class);
+    }
+
+    public function liveClasses()
+    {
+        return $this->hasMany(LiveClass::class);
+    }
 }

@@ -36,8 +36,23 @@ class Batch extends Model
         return $this->belongsTo(Department::class);
     }
 
+    public function students()
+    {
+        return $this->hasMany(StudentProfile::class);
+    }
+
+    public function courses()
+    {
+        return $this->hasMany(Course::class);
+    }
+
     public function attendanceRecords()
     {
         return $this->hasMany(AttendanceRecord::class);
+    }
+
+    public function liveClasses()
+    {
+        return $this->hasMany(LiveClass::class);
     }
 }

@@ -135,6 +135,8 @@ class LessonProgressController extends Controller
 
     private function recalculateCourseEnrollmentProgress(CourseEnrollment $courseEnrollment): void
     {
+        $courseEnrollment->loadMissing('course');
+
         $course = $courseEnrollment->course;
 
         $totalLessons = Lesson::where('course_id', $course->id)

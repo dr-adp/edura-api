@@ -33,6 +33,7 @@ use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\TeacherProfileController;
 use App\Http\Controllers\Api\UploadController;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\Api\StudentDashboardController;
 
 /*
 |--------------------------------------------------------------------------
@@ -287,6 +288,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         'role:super-admin|institution-admin|teacher|student'
     ])->group(function () {
 
+        Route::get(
+            '/student-dashboard/{studentProfile}',
+            [StudentDashboardController::class, 'show']
+        );
+
         Route::apiResource(
             'lesson-progress',
             LessonProgressController::class
@@ -329,4 +335,3 @@ Route::middleware(['auth:sanctum'])->group(function () {
         );
     });
 });
-

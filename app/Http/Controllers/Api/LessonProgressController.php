@@ -19,8 +19,8 @@ class LessonProgressController extends Controller
             'courseEnrollment.studentProfile.user',
             'lesson'
         ])
-        ->latest()
-        ->paginate(20);
+            ->latest()
+            ->paginate(20);
 
         return response()->json([
             'message' => 'Lesson progress records fetched successfully.',
@@ -151,11 +151,18 @@ class LessonProgressController extends Controller
             return;
         }
 
-        $completedLessons = LessonProgress::where('course_enrollment_id', $courseEnrollment->id)
+        $completedLessons = LessonProgress::where(
+            'course_enrollment_id',
+            $courseEnrollment->id
+        )
             ->where('status', 'completed')
-            ->count();
+            ->distinct('lesson_id')
+            ->count('lesson_id');
 
-        $percentage = round(($completedLessons / $totalLessons) * 100, 2);
+        $percentage = min(
+            100,
+            round(($completedLessons / $totalLessons) * 100, 2)
+        );
 
         $courseEnrollment->update([
             'progress_percentage' => $percentage,

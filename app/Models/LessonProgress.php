@@ -27,13 +27,13 @@ class LessonProgress extends Model
         'completed_at' => 'datetime',
     ];
 
-    public function courseEnrollment()
-    {
-        return $this->belongsTo(CourseEnrollment::class);
-    }
-
     public function lesson()
     {
         return $this->belongsTo(Lesson::class);
+    }
+
+    public function courseEnrollment()
+    {
+        return $this->belongsTo(CourseEnrollment::class);
     }
 }

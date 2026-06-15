@@ -21,9 +21,9 @@ class CourseEnrollment extends Model
     ];
 
     protected $casts = [
-        'enrollment_date' => 'date',
         'amount_paid' => 'decimal:2',
         'progress_percentage' => 'decimal:2',
+        'enrollment_date' => 'date',
         'completed_at' => 'datetime',
     ];
 

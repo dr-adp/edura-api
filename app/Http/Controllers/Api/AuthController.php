@@ -17,11 +17,20 @@ class AuthController extends Controller
         $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'email' => ['required', 'email', 'max:255', 'unique:users,email'],
-            'password' => ['required', 'string', 'min:8', 'confirmed'],
-            'role' => ['nullable', 'string', 'in:institution-admin,teacher,student,parent'],
+            'password' => [
+                'required',
+                'string',
+                'min:8',
+                'confirmed',
+                'regex:/[A-Z]/',
+                'regex:/[a-z]/',
+                'regex:/[0-9]/',
+                'regex:/[@$!%*#?&]/',
+            ],
         ]);
 
-        $roleName = $request->role ?? 'student';
+        // 🔐 FIX: Force all self-registrations to be 'student' role
+        $roleName = 'student';
 
         $role = Role::where('name', $roleName)->first();
 
@@ -34,7 +43,7 @@ class AuthController extends Controller
 
         $user->assignRole($roleName);
 
-        $token = $user->createToken('edura-api-token')->plainTextToken;
+        $token = $user->createToken('edura-api-token', ['*'])->plainTextToken;
 
         return response()->json([
             'message' => 'Registration successful.',
@@ -60,13 +69,18 @@ class AuthController extends Controller
             ]);
         }
 
-        $user->tokens()->delete();
+        // 🔐 FIX: Do NOT delete all tokens — allows multi-device login
+        // Only delete expired tokens older than 30 days
+        $user->tokens()
+            ->where('created_at', '<', now()->subDays(30))
+            ->delete();
 
-        $token = $user->createToken('edura-api-token')->plainTextToken;
+        $token = $user->createToken('edura-api-token', ['*'])->plainTextToken;
 
         return response()->json([
             'message' => 'Login successful.',
             'token' => $token,
+            'token_type' => 'Bearer',
             'user' => $user,
             'roles' => $user->getRoleNames(),
             'permissions' => $user->getAllPermissions()->pluck('name'),

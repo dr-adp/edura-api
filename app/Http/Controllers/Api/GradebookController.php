@@ -6,27 +6,66 @@ use App\Models\Course;
 use App\Models\Gradebook;
 use App\Models\QuizAttempt;
 use App\Models\StudentProfile;
+use App\Models\TeacherProfile;
+use App\Models\ParentProfile;
+use App\Models\InstitutionUser;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use App\Models\AssignmentEvaluation;
 use App\Http\Controllers\Controller;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
 
 class GradebookController extends Controller
 {
     public function index(): JsonResponse
     {
+        $user = Auth::user();
+
         $gradebooks = Gradebook::with([
             'course',
             'studentProfile.user',
             'studentProfile.batch'
-        ])
-            ->latest()
-            ->paginate(20);
+        ]);
+
+        // SCOPING: Filter by user's role
+        if ($user->hasRole('super-admin')) {
+            // Super-admin sees all
+        } elseif ($user->hasRole('institution-admin')) {
+            $institutionUser = InstitutionUser::where('user_id', $user->id)->first();
+            if ($institutionUser) {
+                $gradebooks->whereHas('course', function ($q) use ($institutionUser) {
+                    $q->where('institution_id', $institutionUser->institution_id);
+                });
+            }
+        } elseif ($user->hasRole('teacher')) {
+            $teacherProfile = TeacherProfile::where('user_id', $user->id)->first();
+            if ($teacherProfile) {
+                $gradebooks->whereHas('course', function ($q) use ($teacherProfile) {
+                    $q->where('teacher_profile_id', $teacherProfile->id);
+                });
+            } else {
+                $gradebooks->whereRaw('1 = 0');
+            }
+        } elseif ($user->hasRole('student')) {
+            $studentProfile = StudentProfile::where('user_id', $user->id)->first();
+            if ($studentProfile) {
+                $gradebooks->where('student_profile_id', $studentProfile->id);
+            } else {
+                $gradebooks->whereRaw('1 = 0');
+            }
+        } elseif ($user->hasRole('parent')) {
+            $parentProfile = ParentProfile::where('user_id', $user->id)->first();
+            if ($parentProfile && $parentProfile->student_profile_id) {
+                $gradebooks->where('student_profile_id', $parentProfile->student_profile_id);
+            } else {
+                $gradebooks->whereRaw('1 = 0');
+            }
+        }
 
         return response()->json([
             'message' => 'Gradebook records fetched successfully.',
-            'data' => $gradebooks,
+            'data' => $gradebooks->latest()->paginate(20),
         ]);
     }
 
@@ -36,6 +75,9 @@ class GradebookController extends Controller
             'course_id' => ['required', 'exists:courses,id'],
             'student_profile_id' => ['required', 'exists:student_profiles,id'],
         ]);
+
+        // AUTHORIZATION: Verify teacher owns this course
+        $this->authorizeCourseAccess((int) $validated['course_id']);
 
         $gradebook = $this->calculateGradebook(
             (int) $validated['course_id'],
@@ -54,6 +96,9 @@ class GradebookController extends Controller
 
     public function show(Gradebook $gradebook): JsonResponse
     {
+        // AUTHORIZATION
+        $this->authorizeGradebookAccess($gradebook);
+
         return response()->json([
             'message' => 'Gradebook record fetched successfully.',
             'data' => $gradebook->load([
@@ -66,6 +111,9 @@ class GradebookController extends Controller
 
     public function update(Request $request, Gradebook $gradebook): JsonResponse
     {
+        // AUTHORIZATION: Only teachers who own the course can update
+        $this->authorizeCourseAccess((int) $gradebook->course_id);
+
         $validated = $request->validate([
             'assignment_marks' => ['nullable', 'numeric', 'min:0'],
             'quiz_marks' => ['nullable', 'numeric', 'min:0'],
@@ -103,6 +151,9 @@ class GradebookController extends Controller
 
     public function destroy(Gradebook $gradebook): JsonResponse
     {
+        // AUTHORIZATION: Only teachers who own the course can delete
+        $this->authorizeCourseAccess((int) $gradebook->course_id);
+
         $gradebook->delete();
 
         return response()->json([
@@ -116,6 +167,9 @@ class GradebookController extends Controller
             'course_id' => ['required', 'exists:courses,id'],
             'student_profile_id' => ['required', 'exists:student_profiles,id'],
         ]);
+
+        // AUTHORIZATION: Verify teacher owns this course
+        $this->authorizeCourseAccess((int) $validated['course_id']);
 
         $gradebook = $this->calculateGradebook(
             (int) $validated['course_id'],
@@ -137,18 +191,6 @@ class GradebookController extends Controller
         $course = Course::findOrFail($courseId);
         $student = StudentProfile::findOrFail($studentProfileId);
 
-        if ((int) $course->institution_id !== (int) $student->institution_id) {
-            throw ValidationException::withMessages([
-                'student_profile_id' =>
-                'Student and Course must belong to the same institution.',
-            ]);
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Data Consistency Check
-    |--------------------------------------------------------------------------
-    */
         if ((int) $course->institution_id !== (int) $student->institution_id) {
             throw ValidationException::withMessages([
                 'student_profile_id' =>
@@ -216,5 +258,75 @@ class GradebookController extends Controller
             $percentage >= 40 => 'D',
             default => 'F',
         };
+    }
+
+    /**
+     * Authorize that the authenticated user has access to this course.
+     */
+    private function authorizeCourseAccess(int $courseId): void
+    {
+        $user = Auth::user();
+
+        if ($user->hasRole('super-admin')) {
+            return;
+        }
+
+        $course = Course::find($courseId);
+        if (!$course) {
+            abort(404, 'Course not found.');
+        }
+
+        if ($user->hasRole('institution-admin')) {
+            $institutionUser = InstitutionUser::where('user_id', $user->id)->first();
+            if ($institutionUser && (int) $course->institution_id === (int) $institutionUser->institution_id) {
+                return;
+            }
+            abort(403, 'Unauthorized: Course does not belong to your institution.');
+        }
+
+        if ($user->hasRole('teacher')) {
+            $teacherProfile = TeacherProfile::where('user_id', $user->id)->first();
+            if ($teacherProfile && (int) $course->teacher_profile_id === (int) $teacherProfile->id) {
+                return;
+            }
+            abort(403, 'Unauthorized: This course is not assigned to you.');
+        }
+
+        abort(403, 'Unauthorized: You do not have permission to manage this gradebook.');
+    }
+
+    /**
+     * Authorize access to view a gradebook record.
+     */
+    private function authorizeGradebookAccess(Gradebook $gradebook): void
+    {
+        $user = Auth::user();
+
+        if ($user->hasRole(['super-admin', 'institution-admin'])) {
+            return;
+        }
+
+        if ($user->hasRole('teacher')) {
+            $this->authorizeCourseAccess((int) $gradebook->course_id);
+            return;
+        }
+
+        if ($user->hasRole('student')) {
+            $studentProfile = StudentProfile::where('user_id', $user->id)->first();
+            if ($studentProfile && (int) $studentProfile->id === (int) $gradebook->student_profile_id) {
+                return;
+            }
+            abort(403, 'Unauthorized: You can only view your own gradebook.');
+        }
+
+        if ($user->hasRole('parent')) {
+            $parentProfile = ParentProfile::where('user_id', $user->id)->first();
+            if ($parentProfile && (int) $parentProfile->student_profile_id === (int) $gradebook->student_profile_id) {
+                return;
+            }
+            abort(403, 'Unauthorized: You can only view your child\'s gradebook.');
+        }
+
+        abort(403, 'Unauthorized.');
     }
 }

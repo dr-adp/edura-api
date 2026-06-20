@@ -162,7 +162,11 @@ class QuizAnswerController extends Controller
 
         $percentage = round(($marksObtained / $totalMarks) * 100, 2);
 
-        $resultStatus = $marksObtained >= $attempt->quiz->passing_marks ? 'passed' : 'failed';
+        // FIX: Use PERCENTAGE-based comparison, not raw marks
+        $passingMarks = $attempt->quiz->passing_marks ?? 0;
+        $passPercentage = $totalMarks > 0 ? ($passingMarks / $totalMarks) * 100 : 0;
+
+        $resultStatus = $percentage >= $passPercentage ? 'passed' : 'failed';
 
         $attempt->update([
             'marks_obtained' => $marksObtained,

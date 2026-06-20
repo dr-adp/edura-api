@@ -2,14 +2,16 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Controller;
+use App\Models\InstitutionUser;
 use App\Models\Quiz;
 use App\Models\QuizAttempt;
 use App\Models\StudentProfile;
 use App\Models\TeacherProfile;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use App\Models\User;
 
 class QuizAttemptController extends Controller
 {
@@ -54,29 +56,144 @@ class QuizAttemptController extends Controller
             'student_profile_id' => ['required', 'exists:student_profiles,id'],
         ]);
 
-        // OWNERSHIP CHECK: Student can only start attempts for themselves
+        /** @var User $user */
         $user = Auth::user();
-        if (!$user->hasRole(['super-admin', 'institution-admin', 'teacher'])) {
-            $studentProfile = StudentProfile::where('user_id', $user->id)->first();
-            if (!$studentProfile || (int) $studentProfile->id !== (int) $validated['student_profile_id']) {
-                abort(403, 'Unauthorized: You can only attempt quizzes for yourself.');
+
+        /*
+    |--------------------------------------------------------------------------
+    | Ownership Check
+    |--------------------------------------------------------------------------
+    */
+        if (!$user->hasAnyRole([
+            'super-admin',
+            'institution-admin',
+            'teacher'
+        ])) {
+
+            $studentProfile = StudentProfile::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (
+                !$studentProfile ||
+                (int) $studentProfile->id !==
+                (int) $validated['student_profile_id']
+            ) {
+
+                abort(
+                    403,
+                    'Unauthorized: You can only attempt quizzes for yourself.'
+                );
             }
         }
 
-        $quiz = Quiz::findOrFail($validated['quiz_id']);
+        $quiz = Quiz::findOrFail(
+            $validated['quiz_id']
+        );
 
-        // TIMER CHECK: Ensure quiz is available
-        if ($quiz->available_from && now()->lt($quiz->available_from)) {
-            abort(403, 'This quiz is not yet available.');
+        /*
+    |--------------------------------------------------------------------------
+    | Quiz Availability Check
+    |--------------------------------------------------------------------------
+    */
+        if (
+            $quiz->available_from &&
+            now()->lt($quiz->available_from)
+        ) {
+
+            abort(
+                403,
+                'This quiz is not yet available.'
+            );
         }
-        if ($quiz->available_until && now()->gt($quiz->available_until)) {
-            abort(403, 'This quiz has expired.');
+
+        if (
+            $quiz->available_until &&
+            now()->gt($quiz->available_until)
+        ) {
+
+            abort(
+                403,
+                'This quiz has expired.'
+            );
         }
 
-        $lastAttemptNumber = QuizAttempt::where('quiz_id', $validated['quiz_id'])
-            ->where('student_profile_id', $validated['student_profile_id'])
-            ->max('attempt_number');
+        /*
+    |--------------------------------------------------------------------------
+    | Maximum Attempt Check
+    |--------------------------------------------------------------------------
+    */
+        $currentAttempts = QuizAttempt::where(
+            'quiz_id',
+            $validated['quiz_id']
+        )
+            ->where(
+                'student_profile_id',
+                $validated['student_profile_id']
+            )
+            ->count();
 
+        if (
+            $quiz->maximum_attempts &&
+            $currentAttempts >= $quiz->maximum_attempts
+        ) {
+
+            abort(
+                403,
+                'Maximum number of attempts reached.'
+            );
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Prevent Duplicate In-Progress Attempt
+    |--------------------------------------------------------------------------
+    */
+        $inProgressAttempt = QuizAttempt::where(
+            'quiz_id',
+            $validated['quiz_id']
+        )
+            ->where(
+                'student_profile_id',
+                $validated['student_profile_id']
+            )
+            ->where(
+                'status',
+                'in_progress'
+            )
+            ->exists();
+
+        if ($inProgressAttempt) {
+
+            abort(
+                403,
+                'You already have an unfinished attempt.'
+            );
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Next Attempt Number
+    |--------------------------------------------------------------------------
+    */
+        $lastAttemptNumber = QuizAttempt::where(
+            'quiz_id',
+            $validated['quiz_id']
+        )
+            ->where(
+                'student_profile_id',
+                $validated['student_profile_id']
+            )
+            ->max(
+                'attempt_number'
+            );
+
+        /*
+    |--------------------------------------------------------------------------
+    | Create Attempt
+    |--------------------------------------------------------------------------
+    */
         $attempt = QuizAttempt::create([
             'quiz_id' => $validated['quiz_id'],
             'student_profile_id' => $validated['student_profile_id'],
@@ -115,70 +232,274 @@ class QuizAttemptController extends Controller
 
     public function update(Request $request, QuizAttempt $quizAttempt): JsonResponse
     {
-        // OWNERSHIP CHECK
+        /** @var User $user */
         $user = Auth::user();
-        if (!$user->hasRole(['super-admin', 'institution-admin', 'teacher'])) {
-            $studentProfile = StudentProfile::where('user_id', $user->id)->first();
-            if (!$studentProfile || (int) $studentProfile->id !== (int) $quizAttempt->student_profile_id) {
-                abort(403, 'Unauthorized: You can only update your own quiz attempts.');
+
+        /*
+    |--------------------------------------------------------------------------
+    | Ownership Check
+    |--------------------------------------------------------------------------
+    */
+        if (!$user->hasAnyRole([
+            'super-admin',
+            'institution-admin',
+            'teacher'
+        ])) {
+
+            $studentProfile = StudentProfile::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (
+                !$studentProfile ||
+                (int)$studentProfile->id !==
+                (int)$quizAttempt->student_profile_id
+            ) {
+
+                abort(
+                    403,
+                    'Unauthorized: You can only update your own quiz attempts.'
+                );
+            }
+
+            /*
+        |--------------------------------------------------------------------------
+        | Student cannot modify submitted/evaluated attempts
+        |--------------------------------------------------------------------------
+        */
+            if (
+                in_array(
+                    $quizAttempt->status,
+                    [
+                        'submitted',
+                        'evaluated',
+                        'cancelled'
+                    ]
+                )
+            ) {
+
+                abort(
+                    403,
+                    'This attempt can no longer be modified.'
+                );
             }
         }
 
+        /*
+    |--------------------------------------------------------------------------
+    | Validation
+    |--------------------------------------------------------------------------
+    */
         $validated = $request->validate([
-            'marks_obtained' => ['nullable', 'numeric', 'min:0'],
-            'status' => ['nullable', 'in:in_progress,submitted,evaluated,cancelled'],
+            'status' => [
+                'nullable',
+                'in:in_progress,submitted,evaluated,cancelled'
+            ],
+            'marks_obtained' => [
+                'nullable',
+                'numeric',
+                'min:0'
+            ],
         ]);
 
-        // TIMER ENFORCEMENT: Check if quiz duration has expired on submit
-        if (($validated['status'] ?? null) === 'submitted' && $quizAttempt->quiz->duration_minutes) {
-            $startTime = $quizAttempt->started_at;
-            $elapsedMinutes = $startTime ? now()->diffInMinutes($startTime) : 0;
-            if ($elapsedMinutes > $quizAttempt->quiz->duration_minutes) {
-                // Auto-submit with whatever answers they have
-                $validated['status'] = 'submitted';
-                $validated['submitted_at'] = now();
+        /*
+|--------------------------------------------------------------------------
+| Teachers/Admins evaluate attempts
+|--------------------------------------------------------------------------
+*/
+        if (
+            $user->hasAnyRole([
+                'teacher',
+                'institution-admin',
+                'super-admin'
+            ])
+        ) {
+
+            /*
+    |--------------------------------------------------------------------------
+    | Teacher Ownership Check
+    |--------------------------------------------------------------------------
+    */
+            if ($user->hasRole('teacher')) {
+
+                $teacherProfile = TeacherProfile::where(
+                    'user_id',
+                    $user->id
+                )->first();
+
+                if (
+                    !$teacherProfile ||
+                    $quizAttempt->quiz->teacher_profile_id !== $teacherProfile->id
+                ) {
+
+                    abort(
+                        403,
+                        'Unauthorized: This quiz does not belong to you.'
+                    );
+                }
             }
+
+            /*
+    |--------------------------------------------------------------------------
+    | Institution Admin Scope Check
+    |--------------------------------------------------------------------------
+    */
+            if ($user->hasRole('institution-admin')) {
+
+                $institutionUser = InstitutionUser::where(
+                    'user_id',
+                    $user->id
+                )->first();
+
+                if (
+                    !$institutionUser ||
+                    $quizAttempt->studentProfile->institution_id !==
+                    $institutionUser->institution_id
+                ) {
+
+                    abort(
+                        403,
+                        'Unauthorized institution access.'
+                    );
+                }
+            }
+
+            if (isset($validated['marks_obtained'])) {
+
+                /*
+        |--------------------------------------------------------------------------
+        | Prevent Marks > Total Marks
+        |--------------------------------------------------------------------------
+        */
+                if (
+                    $validated['marks_obtained'] >
+                    $quizAttempt->total_marks
+                ) {
+
+                    abort(
+                        422,
+                        'Marks obtained cannot exceed total marks.'
+                    );
+                }
+
+                $totalMarks = max(
+                    1,
+                    $quizAttempt->total_marks
+                );
+
+                $validated['percentage'] = round(
+                    ($validated['marks_obtained'] / $totalMarks) * 100,
+                    2
+                );
+
+                $passingMarks =
+                    $quizAttempt->quiz->passing_marks ?? 0;
+
+                $passPercentage = round(
+                    ($passingMarks / $totalMarks) * 100,
+                    2
+                );
+
+                $validated['result_status'] =
+                    $validated['percentage'] >= $passPercentage
+                    ? 'passed'
+                    : 'failed';
+            }
+        } else {
+
+            /*
+    |--------------------------------------------------------------------------
+    | Students cannot change marks/result
+    |--------------------------------------------------------------------------
+    */
+            unset(
+                $validated['marks_obtained'],
+                $validated['percentage'],
+                $validated['result_status']
+            );
         }
 
-        if (isset($validated['marks_obtained'])) {
-            $totalMarks = $quizAttempt->total_marks > 0 ? $quizAttempt->total_marks : 1;
+        /*
+    |--------------------------------------------------------------------------
+    | Submission Timestamp
+    |--------------------------------------------------------------------------
+    */
+        if (
+            ($validated['status'] ?? null) === 'submitted'
+        ) {
 
-            $validated['percentage'] = round(($validated['marks_obtained'] / $totalMarks) * 100, 2);
-
-            // FIX: Use PERCENTAGE-based comparison, not raw marks
-            $passingMarks = $quizAttempt->quiz->passing_marks ?? 0;
-            $passPercentage = $totalMarks > 0 ? ($passingMarks / $totalMarks) * 100 : 0;
-
-            $validated['result_status'] = $validated['percentage'] >= $passPercentage
-                ? 'passed'
-                : 'failed';
-        }
-
-        if (($validated['status'] ?? null) === 'submitted') {
             $validated['submitted_at'] = now();
         }
 
-        if (($validated['status'] ?? null) === 'evaluated' && !$quizAttempt->submitted_at) {
-            $validated['submitted_at'] = now();
+        /*
+|--------------------------------------------------------------------------
+| Lock Evaluated Attempts
+|--------------------------------------------------------------------------
+*/
+        if (
+            $quizAttempt->status === 'evaluated'
+        ) {
+
+            abort(
+                403,
+                'Evaluated attempts cannot be modified.'
+            );
         }
 
         $quizAttempt->update($validated);
 
         return response()->json([
             'message' => 'Quiz attempt updated successfully.',
-            'data' => $quizAttempt->fresh()->load([
-                'quiz.course',
-                'studentProfile.user',
-                'studentProfile.batch'
-            ]),
+            'data' => $quizAttempt
+                ->fresh()
+                ->load([
+                    'quiz.course',
+                    'studentProfile.user',
+                    'studentProfile.batch'
+                ]),
         ]);
     }
 
     public function destroy(QuizAttempt $quizAttempt): JsonResponse
     {
+        /** @var User $user */
         $user = Auth::user();
-        if (!$user->hasRole(['super-admin', 'institution-admin'])) {
-            abort(403, 'Unauthorized: Only admins can delete quiz attempts.');
+
+        if (!$user->hasAnyRole([
+            'super-admin',
+            'institution-admin'
+        ])) {
+
+            abort(
+                403,
+                'Unauthorized: Only admins can delete quiz attempts.'
+            );
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Institution Admin Scope
+    |--------------------------------------------------------------------------
+    */
+        if ($user->hasRole('institution-admin')) {
+
+            $institutionUser = InstitutionUser::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (
+                !$institutionUser ||
+                $quizAttempt->studentProfile->institution_id !==
+                $institutionUser->institution_id
+            ) {
+
+                abort(
+                    403,
+                    'Unauthorized institution access.'
+                );
+            }
         }
 
         $quizAttempt->delete();
@@ -192,8 +513,30 @@ class QuizAttemptController extends Controller
     {
         $user = Auth::user();
 
-        if ($user->hasRole(['super-admin', 'institution-admin'])) {
+        if ($user->hasRole('super-admin')) {
             return;
+        }
+
+        if ($user->hasRole('institution-admin')) {
+
+            $institutionUser = InstitutionUser::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (
+                $institutionUser &&
+                $quizAttempt->studentProfile->institution_id ===
+                $institutionUser->institution_id
+            ) {
+
+                return;
+            }
+
+            abort(
+                403,
+                'Unauthorized institution access.'
+            );
         }
 
         if ($user->hasRole('teacher')) {

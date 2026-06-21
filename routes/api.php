@@ -28,12 +28,12 @@ use App\Http\Controllers\Api\QuizAnswerController;
 use App\Http\Controllers\Api\QuizAttemptController;
 use App\Http\Controllers\Api\QuizController;
 use App\Http\Controllers\Api\QuizQuestionController;
+use App\Http\Controllers\Api\StudentDashboardController;
 use App\Http\Controllers\Api\StudentProfileController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\TeacherProfileController;
 use App\Http\Controllers\Api\UploadController;
 use Illuminate\Support\Facades\Route;
-use App\Http\Controllers\Api\StudentDashboardController;
 
 /*
 |--------------------------------------------------------------------------
@@ -143,7 +143,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     */
 
     Route::middleware([
-        'role:super-admin|institution-admin|teacher'
+        'role:super-admin|institution-admin|teacher',
     ])->group(function () {
 
         Route::apiResource('courses', CourseController::class);
@@ -207,7 +207,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::apiResource(
             'assignment-evaluations',
             AssignmentEvaluationController::class
-        );
+        )->only([
+            'store',
+            'update',
+            'destroy',
+        ]);
 
         /*
         |--------------------------------------------------------------------------
@@ -262,15 +266,14 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [CertificateController::class, 'generate']
         );
 
-        Route::get(
-            '/certificates/{certificate}/download',
-            [CertificateController::class, 'download']
-        );
-
         Route::apiResource(
             'certificates',
             CertificateController::class
-        );
+        )->only([
+            'store',
+            'update',
+            'destroy',
+        ]);
 
         Route::apiResource(
             'certificate-settings',
@@ -285,7 +288,7 @@ Route::middleware(['auth:sanctum'])->group(function () {
     */
 
     Route::middleware([
-        'role:super-admin|institution-admin|teacher|student'
+        'role:super-admin|institution-admin|teacher|student',
     ])->group(function () {
 
         Route::get(
@@ -296,7 +299,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::apiResource(
             'lesson-progress',
             LessonProgressController::class
-        );
+        )->only([
+            'store',
+            'update',
+            'destroy',
+        ]);
 
         Route::apiResource(
             'assignment-submissions',
@@ -321,8 +328,43 @@ Route::middleware(['auth:sanctum'])->group(function () {
     */
 
     Route::middleware([
-        'role:super-admin|institution-admin|teacher|student|parent'
+        'role:super-admin|institution-admin|teacher|student|parent',
     ])->group(function () {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Read-Only Academic Records
+        |--------------------------------------------------------------------------
+        */
+
+        Route::apiResource(
+            'lesson-progress',
+            LessonProgressController::class
+        )->only([
+            'index',
+            'show',
+        ]);
+
+        Route::apiResource(
+            'assignment-evaluations',
+            AssignmentEvaluationController::class
+        )->only([
+            'index',
+            'show',
+        ]);
+
+        Route::get(
+            '/certificates/{certificate}/download',
+            [CertificateController::class, 'download']
+        );
+
+        Route::apiResource(
+            'certificates',
+            CertificateController::class
+        )->only([
+            'index',
+            'show',
+        ]);
 
         Route::get(
             '/my-gradebooks',

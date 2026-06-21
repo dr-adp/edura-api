@@ -2,45 +2,89 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Controller;
 use App\Models\Certificate;
 use App\Models\CertificateSetting;
+use App\Models\Course;
+use App\Models\CourseEnrollment;
 use App\Models\Gradebook;
-use Illuminate\Http\Request;
+use App\Models\InstitutionUser;
+use App\Models\ParentProfile;
+use App\Models\StudentProfile;
+use App\Models\TeacherProfile;
+use App\Models\User;
+use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
-use App\Http\Controllers\Controller;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
-use Barryvdh\DomPDF\Facade\Pdf;
+use Illuminate\Validation\ValidationException;
 
 class CertificateController extends Controller
 {
+    private const CERTIFICATE_RELATIONS = [
+        'course.institution',
+        'studentProfile.user',
+        'gradebook',
+    ];
+
+    private const VALID_ENROLLMENT_STATUSES = [
+        'active',
+        'completed',
+    ];
+
     public function index(): JsonResponse
     {
-        $certificates = Certificate::with([
-            'course.institution',
-            'studentProfile.user',
-            'gradebook',
-        ])->latest()->paginate(20);
+        /** @var User $user */
+        $user = Auth::user();
+
+        $query = Certificate::with(self::CERTIFICATE_RELATIONS);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Scoped Certificate Listing
+        |--------------------------------------------------------------------------
+        */
+        $this->scopeCertificateQuery($query, $user);
 
         return response()->json([
             'message' => 'Certificates fetched successfully.',
-            'data' => $certificates,
+            'data' => $query->latest()->paginate(20),
         ]);
     }
 
     public function store(Request $request): JsonResponse
     {
+        /** @var User $user */
+        $user = Auth::user();
+
         $validated = $request->validate([
             'course_id' => ['required', 'exists:courses,id'],
             'student_profile_id' => ['required', 'exists:student_profiles,id'],
             'remarks' => ['nullable', 'string'],
         ]);
 
-        $gradebook = Gradebook::where('course_id', $validated['course_id'])
-            ->where('student_profile_id', $validated['student_profile_id'])
+        $course = Course::findOrFail($validated['course_id']);
+        $studentProfile = StudentProfile::findOrFail($validated['student_profile_id']);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Ownership And Enrollment Check
+        |--------------------------------------------------------------------------
+        */
+        $this->authorizeCertificatePairManagement(
+            $course,
+            $studentProfile,
+            $user
+        );
+
+        $gradebook = Gradebook::where('course_id', $course->id)
+            ->where('student_profile_id', $studentProfile->id)
             ->first();
 
-        if (!$gradebook) {
+        if (! $gradebook) {
             return response()->json([
                 'message' => 'Gradebook record not found. Please calculate gradebook first.',
             ], 422);
@@ -52,20 +96,23 @@ class CertificateController extends Controller
             ], 422);
         }
 
-        $existingCertificate = Certificate::where('course_id', $validated['course_id'])
-            ->where('student_profile_id', $validated['student_profile_id'])
+        $existingCertificate = Certificate::where('course_id', $course->id)
+            ->where('student_profile_id', $studentProfile->id)
             ->first();
 
         $certificate = Certificate::updateOrCreate(
             [
-                'course_id' => $validated['course_id'],
-                'student_profile_id' => $validated['student_profile_id'],
+                'course_id' => $course->id,
+                'student_profile_id' => $studentProfile->id,
             ],
             [
                 'gradebook_id' => $gradebook->id,
-                'certificate_number' => $existingCertificate?->certificate_number ?? 'EDURA-' . strtoupper(Str::random(10)),
-                'certificate_uuid' => $existingCertificate?->certificate_uuid ?? (string) Str::uuid(),
-                'verification_token' => $existingCertificate?->verification_token ?? strtoupper(Str::random(16)),
+                'certificate_number' => $existingCertificate?->certificate_number
+                    ?? 'EDURA-'.strtoupper(Str::random(10)),
+                'certificate_uuid' => $existingCertificate?->certificate_uuid
+                    ?? (string) Str::uuid(),
+                'verification_token' => $existingCertificate?->verification_token
+                    ?? strtoupper(Str::random(16)),
                 'issued_date' => now()->toDateString(),
                 'final_percentage' => $gradebook->percentage,
                 'final_grade' => $gradebook->grade,
@@ -79,28 +126,24 @@ class CertificateController extends Controller
 
         return response()->json([
             'message' => 'Certificate issued successfully.',
-            'data' => $certificate->fresh()->load([
-                'course.institution',
-                'studentProfile.user',
-                'gradebook',
-            ]),
+            'data' => $certificate->fresh()->load(self::CERTIFICATE_RELATIONS),
         ], 201);
     }
 
     public function show(Certificate $certificate): JsonResponse
     {
+        $this->authorizeCertificateAccess($certificate);
+
         return response()->json([
             'message' => 'Certificate fetched successfully.',
-            'data' => $certificate->load([
-                'course.institution',
-                'studentProfile.user',
-                'gradebook',
-            ]),
+            'data' => $certificate->load(self::CERTIFICATE_RELATIONS),
         ]);
     }
 
     public function update(Request $request, Certificate $certificate): JsonResponse
     {
+        $this->authorizeCertificateManagement($certificate);
+
         $validated = $request->validate([
             'status' => ['nullable', 'in:pending,issued,revoked'],
             'verification_status' => ['nullable', 'in:valid,revoked,expired'],
@@ -111,17 +154,18 @@ class CertificateController extends Controller
 
         return response()->json([
             'message' => 'Certificate updated successfully.',
-            'data' => $certificate->fresh()->load([
-                'course.institution',
-                'studentProfile.user',
-                'gradebook',
-            ]),
+            'data' => $certificate->fresh()->load(self::CERTIFICATE_RELATIONS),
         ]);
     }
 
     public function destroy(Certificate $certificate): JsonResponse
     {
-        if ($certificate->certificate_file && Storage::disk('public')->exists($certificate->certificate_file)) {
+        $this->authorizeCertificateManagement($certificate);
+
+        if (
+            $certificate->certificate_file &&
+            Storage::disk('public')->exists($certificate->certificate_file)
+        ) {
             Storage::disk('public')->delete($certificate->certificate_file);
         }
 
@@ -134,21 +178,24 @@ class CertificateController extends Controller
 
     public function generate(Certificate $certificate): JsonResponse
     {
+        $this->authorizeCertificateManagement($certificate);
+
         $this->generateCertificatePdf($certificate);
 
         return response()->json([
             'message' => 'Certificate PDF generated successfully.',
-            'data' => $certificate->fresh()->load([
-                'course.institution',
-                'studentProfile.user',
-                'gradebook',
-            ]),
+            'data' => $certificate->fresh()->load(self::CERTIFICATE_RELATIONS),
         ]);
     }
 
     public function download(Certificate $certificate)
     {
-        if (!$certificate->certificate_file || !Storage::disk('public')->exists($certificate->certificate_file)) {
+        $this->authorizeCertificateAccess($certificate);
+
+        if (
+            ! $certificate->certificate_file ||
+            ! Storage::disk('public')->exists($certificate->certificate_file)
+        ) {
             $this->generateCertificatePdf($certificate);
             $certificate = $certificate->fresh();
         }
@@ -158,22 +205,21 @@ class CertificateController extends Controller
 
     public function verify(string $token): JsonResponse
     {
-        $certificate = Certificate::with([
-            'course.institution',
-            'studentProfile.user',
-            'gradebook',
-        ])
+        $certificate = Certificate::with(self::CERTIFICATE_RELATIONS)
             ->where('verification_token', $token)
             ->first();
 
-        if (!$certificate) {
+        if (! $certificate) {
             return response()->json([
                 'message' => 'Certificate not found.',
                 'valid' => false,
             ], 404);
         }
 
-        if ($certificate->verification_status !== 'valid' || $certificate->status !== 'issued') {
+        if (
+            $certificate->verification_status !== 'valid' ||
+            $certificate->status !== 'issued'
+        ) {
             return response()->json([
                 'message' => 'Certificate is not valid.',
                 'valid' => false,
@@ -199,32 +245,30 @@ class CertificateController extends Controller
 
     private function generateCertificatePdf(Certificate $certificate): void
     {
-        $certificate->load([
-            'course.institution',
-            'studentProfile.user',
-            'gradebook',
-        ]);
+        $certificate->load(self::CERTIFICATE_RELATIONS);
 
         $setting = null;
 
         if ($certificate->course?->institution_id) {
-            $setting = CertificateSetting::where('institution_id', $certificate->course->institution_id)
+            $setting = CertificateSetting::where(
+                'institution_id',
+                $certificate->course->institution_id
+            )
                 ->where('status', 'active')
                 ->first();
         }
 
         $verificationUrl = $setting?->verification_url
-            ? rtrim($setting->verification_url, '/') . '/' . $certificate->verification_token
-            : url('/api/verify-certificate/' . $certificate->verification_token);
+            ? rtrim($setting->verification_url, '/').'/'.$certificate->verification_token
+            : url('/api/verify-certificate/'.$certificate->verification_token);
 
-        $fileName = 'certificate-' . $certificate->certificate_number . '.pdf';
-        $filePath = 'certificates/' . $fileName;
+        $fileName = 'certificate-'.$certificate->certificate_number.'.pdf';
+        $filePath = 'certificates/'.$fileName;
 
         $pdf = Pdf::loadView('certificates.template', [
             'certificate' => $certificate,
             'setting' => $setting,
             'verificationUrl' => $verificationUrl,
-            
         ])->setPaper('a4', 'landscape');
 
         Storage::disk('public')->put($filePath, $pdf->output());
@@ -232,5 +276,282 @@ class CertificateController extends Controller
         $certificate->update([
             'certificate_file' => $filePath,
         ]);
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Query Scoping
+    |--------------------------------------------------------------------------
+    */
+    private function scopeCertificateQuery(Builder $query, User $user): void
+    {
+        if ($user->hasRole('super-admin')) {
+            return;
+        }
+
+        if ($user->hasRole('institution-admin')) {
+            $institutionUser = $this->institutionUserFor($user);
+
+            $query
+                ->whereHas('course', function (Builder $courseQuery) use ($institutionUser) {
+                    $courseQuery->where('institution_id', $institutionUser->institution_id);
+                })
+                ->whereHas('studentProfile', function (Builder $studentQuery) use ($institutionUser) {
+                    $studentQuery->where('institution_id', $institutionUser->institution_id);
+                });
+
+            return;
+        }
+
+        if ($user->hasRole('teacher')) {
+            $teacherProfile = $this->teacherProfileFor($user);
+
+            $query
+                ->whereHas('course', function (Builder $courseQuery) use ($teacherProfile) {
+                    $courseQuery->where('teacher_profile_id', $teacherProfile->id);
+                })
+                ->whereExists(function ($enrollmentQuery) {
+                    $enrollmentQuery->selectRaw('1')
+                        ->from('course_enrollments')
+                        ->whereColumn('course_enrollments.course_id', 'certificates.course_id')
+                        ->whereColumn(
+                            'course_enrollments.student_profile_id',
+                            'certificates.student_profile_id'
+                        )
+                        ->whereIn(
+                            'course_enrollments.status',
+                            self::VALID_ENROLLMENT_STATUSES
+                        );
+                });
+
+            return;
+        }
+
+        if ($user->hasRole('student')) {
+            $studentProfile = $this->studentProfileFor($user);
+
+            $query->where('student_profile_id', $studentProfile->id);
+
+            return;
+        }
+
+        if ($user->hasRole('parent')) {
+            $parentProfile = $this->parentProfileFor($user);
+
+            $query->where('student_profile_id', $parentProfile->student_profile_id);
+
+            return;
+        }
+
+        abort(403, 'Unauthorized role.');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Record Authorization
+    |--------------------------------------------------------------------------
+    */
+    private function authorizeCertificateAccess(
+        Certificate $certificate,
+        ?User $user = null
+    ): void {
+        $user ??= Auth::user();
+
+        $certificate->loadMissing([
+            'course',
+            'studentProfile',
+        ]);
+
+        if ($user->hasRole('super-admin')) {
+            return;
+        }
+
+        if ($user->hasRole('institution-admin')) {
+            $institutionUser = $this->institutionUserFor($user);
+
+            if (
+                $certificate->course &&
+                $certificate->studentProfile &&
+                (int) $certificate->course->institution_id ===
+                    (int) $institutionUser->institution_id &&
+                (int) $certificate->studentProfile->institution_id ===
+                    (int) $institutionUser->institution_id
+            ) {
+                return;
+            }
+
+            abort(403, 'Unauthorized institution access.');
+        }
+
+        if ($user->hasRole('teacher')) {
+            $teacherProfile = $this->teacherProfileFor($user);
+
+            if (
+                $certificate->course &&
+                (int) $certificate->course->teacher_profile_id ===
+                    (int) $teacherProfile->id &&
+                $this->studentEnrolledInCourse(
+                    (int) $certificate->course_id,
+                    (int) $certificate->student_profile_id
+                )
+            ) {
+                return;
+            }
+
+            abort(403, 'Unauthorized: Certificate does not belong to your course student.');
+        }
+
+        if ($user->hasRole('student')) {
+            $studentProfile = $this->studentProfileFor($user);
+
+            if ((int) $certificate->student_profile_id === (int) $studentProfile->id) {
+                return;
+            }
+
+            abort(403, 'Unauthorized: You can only access your own certificates.');
+        }
+
+        if ($user->hasRole('parent')) {
+            $parentProfile = $this->parentProfileFor($user);
+
+            if (
+                (int) $certificate->student_profile_id ===
+                (int) $parentProfile->student_profile_id
+            ) {
+                return;
+            }
+
+            abort(403, 'Unauthorized: You can only access your child certificates.');
+        }
+
+        abort(403, 'Unauthorized role.');
+    }
+
+    private function authorizeCertificateManagement(
+        Certificate $certificate,
+        ?User $user = null
+    ): void {
+        $user ??= Auth::user();
+
+        if (! $user->hasAnyRole([
+            'super-admin',
+            'institution-admin',
+            'teacher',
+        ])) {
+            abort(403, 'Unauthorized: Certificates are read-only for your role.');
+        }
+
+        $this->authorizeCertificateAccess($certificate, $user);
+    }
+
+    private function authorizeCertificatePairManagement(
+        Course $course,
+        StudentProfile $studentProfile,
+        User $user
+    ): void {
+        if (! $user->hasAnyRole([
+            'super-admin',
+            'institution-admin',
+            'teacher',
+        ])) {
+            abort(403, 'Unauthorized: You cannot issue certificates.');
+        }
+
+        if ($user->hasRole('institution-admin')) {
+            $institutionUser = $this->institutionUserFor($user);
+
+            if (
+                (int) $course->institution_id !== (int) $institutionUser->institution_id ||
+                (int) $studentProfile->institution_id !==
+                    (int) $institutionUser->institution_id
+            ) {
+                abort(403, 'Unauthorized institution access.');
+            }
+        }
+
+        if ($user->hasRole('teacher')) {
+            $teacherProfile = $this->teacherProfileFor($user);
+
+            if ((int) $course->teacher_profile_id !== (int) $teacherProfile->id) {
+                abort(403, 'Unauthorized: This course is not assigned to you.');
+            }
+        }
+
+        if ((int) $course->institution_id !== (int) $studentProfile->institution_id) {
+            throw ValidationException::withMessages([
+                'student_profile_id' => 'Student and course must belong to the same institution.',
+            ]);
+        }
+
+        if (! $this->studentEnrolledInCourse($course->id, $studentProfile->id)) {
+            throw ValidationException::withMessages([
+                'student_profile_id' => 'Student is not enrolled in this course.',
+            ]);
+        }
+    }
+
+    private function studentEnrolledInCourse(int $courseId, int $studentProfileId): bool
+    {
+        return CourseEnrollment::where('course_id', $courseId)
+            ->where('student_profile_id', $studentProfileId)
+            ->whereIn('status', self::VALID_ENROLLMENT_STATUSES)
+            ->exists();
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Role Profiles
+    |--------------------------------------------------------------------------
+    */
+    private function institutionUserFor(User $user): InstitutionUser
+    {
+        $institutionUser = InstitutionUser::where('user_id', $user->id)
+            ->where('status', 'active')
+            ->first();
+
+        if ($institutionUser) {
+            return $institutionUser;
+        }
+
+        abort(403, 'Unauthorized: Institution profile not found.');
+    }
+
+    private function teacherProfileFor(User $user): TeacherProfile
+    {
+        $teacherProfile = TeacherProfile::where('user_id', $user->id)
+            ->where('status', 'active')
+            ->first();
+
+        if ($teacherProfile) {
+            return $teacherProfile;
+        }
+
+        abort(403, 'Unauthorized: Teacher profile not found.');
+    }
+
+    private function studentProfileFor(User $user): StudentProfile
+    {
+        $studentProfile = StudentProfile::where('user_id', $user->id)
+            ->where('status', 'active')
+            ->first();
+
+        if ($studentProfile) {
+            return $studentProfile;
+        }
+
+        abort(403, 'Unauthorized: Student profile not found.');
+    }
+
+    private function parentProfileFor(User $user): ParentProfile
+    {
+        $parentProfile = ParentProfile::where('user_id', $user->id)
+            ->where('status', 'active')
+            ->first();
+
+        if ($parentProfile && $parentProfile->student_profile_id) {
+            return $parentProfile;
+        }
+
+        abort(403, 'Unauthorized: Parent profile not found.');
     }
 }

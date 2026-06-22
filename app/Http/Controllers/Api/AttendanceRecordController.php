@@ -13,6 +13,9 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use Illuminate\Support\Facades\Auth;
+use App\Models\User;
+use App\Models\InstitutionUser;
 
 class AttendanceRecordController extends Controller
 {
@@ -53,6 +56,24 @@ class AttendanceRecordController extends Controller
     {
         $validated = $this->validateRecord($request);
         $data = $this->prepareRecordData($validated, $request);
+
+        $studentProfile = StudentProfile::findOrFail(
+            $data['student_profile_id']
+        );
+
+        $course = null;
+
+        if (!empty($data['course_id'])) {
+
+            $course = Course::findOrFail(
+                $data['course_id']
+            );
+        }
+
+        $this->authorizeAttendanceRecord(
+            course: $course,
+            studentProfile: $studentProfile
+        );
         $this->ensureCheckoutIsAfterCheckin($data);
 
         $this->ensureRecordIsUnique(
@@ -100,6 +121,23 @@ class AttendanceRecordController extends Controller
                     array_merge($sharedData, $recordInput),
                     $request
                 );
+                $studentProfile = StudentProfile::findOrFail(
+                    $data['student_profile_id']
+                );
+
+                $course = null;
+
+                if (!empty($data['course_id'])) {
+
+                    $course = Course::findOrFail(
+                        $data['course_id']
+                    );
+                }
+
+                $this->authorizeAttendanceRecord(
+                    course: $course,
+                    studentProfile: $studentProfile
+                );
                 $this->ensureCheckoutIsAfterCheckin($data);
 
                 $savedRecords->push($this->updateOrCreateRecordForDate($data));
@@ -118,6 +156,9 @@ class AttendanceRecordController extends Controller
 
     public function show(AttendanceRecord $attendanceRecord): JsonResponse
     {
+        $this->authorizeAttendanceRecord(
+            attendanceRecord: $attendanceRecord
+        );
         return response()->json([
             'message' => 'Attendance record fetched successfully.',
             'data' => $attendanceRecord->load(self::RELATIONS),
@@ -126,9 +167,47 @@ class AttendanceRecordController extends Controller
 
     public function update(Request $request, AttendanceRecord $attendanceRecord): JsonResponse
     {
-        $validated = $this->validateRecord($request, true);
-        $data = $this->prepareRecordData($validated, $request, $attendanceRecord);
-        $this->ensureCheckoutIsAfterCheckin($data);
+        $this->authorizeAttendanceRecord(
+            attendanceRecord: $attendanceRecord
+        );
+
+        $validated = $this->validateRecord(
+            $request,
+            true
+        );
+
+        $data = $this->prepareRecordData(
+            $validated,
+            $request,
+            $attendanceRecord
+        );
+
+        /*
+    |--------------------------------------------------------------------------
+    | Re-Authorize New Target Data
+    |--------------------------------------------------------------------------
+    */
+        $studentProfile = StudentProfile::findOrFail(
+            $data['student_profile_id']
+        );
+
+        $course = null;
+
+        if (!empty($data['course_id'])) {
+
+            $course = Course::findOrFail(
+                $data['course_id']
+            );
+        }
+
+        $this->authorizeAttendanceRecord(
+            course: $course,
+            studentProfile: $studentProfile
+        );
+
+        $this->ensureCheckoutIsAfterCheckin(
+            $data
+        );
 
         $this->ensureRecordIsUnique(
             (int) $data['student_profile_id'],
@@ -136,16 +215,23 @@ class AttendanceRecordController extends Controller
             $attendanceRecord->id
         );
 
-        $attendanceRecord->update($data);
+        $attendanceRecord->update(
+            $data
+        );
 
         return response()->json([
             'message' => 'Attendance record updated successfully.',
-            'data' => $attendanceRecord->fresh()->load(self::RELATIONS),
+            'data' => $attendanceRecord
+                ->fresh()
+                ->load(self::RELATIONS),
         ]);
     }
 
     public function destroy(AttendanceRecord $attendanceRecord): JsonResponse
     {
+        $this->authorizeAttendanceRecord(
+            attendanceRecord: $attendanceRecord
+        );
         $attendanceRecord->delete();
 
         return response()->json([
@@ -157,9 +243,26 @@ class AttendanceRecordController extends Controller
     {
         $validated = $this->validateFilters($request);
 
+        /*
+    |--------------------------------------------------------------------------
+    | Explicit Course Authorization
+    |--------------------------------------------------------------------------
+    */
+        if (!empty($validated['course_id'])) {
+
+            $course = Course::findOrFail(
+                $validated['course_id']
+            );
+
+            $this->authorizeAttendanceRecord(
+                course: $course
+            );
+        }
+
         $fromDate = $validated['date']
             ?? $validated['from_date']
             ?? now()->startOfMonth()->toDateString();
+
         $toDate = $validated['date']
             ?? $validated['to_date']
             ?? now()->toDateString();
@@ -172,37 +275,77 @@ class AttendanceRecordController extends Controller
                 'studentProfile.user',
                 'studentProfile.batch',
             ])
-            ->whereDate('attendance_date', '>=', $fromDate)
-            ->whereDate('attendance_date', '<=', $toDate)
+            ->whereDate(
+                'attendance_date',
+                '>=',
+                $fromDate
+            )
+            ->whereDate(
+                'attendance_date',
+                '<=',
+                $toDate
+            )
             ->orderBy('attendance_date')
             ->get();
 
-        $statusCounts = $this->statusCounts($records);
-        $effectivePresent = $statusCounts['present']
+        $statusCounts = $this->statusCounts(
+            $records
+        );
+
+        $effectivePresent =
+            $statusCounts['present']
             + $statusCounts['late']
             + ($statusCounts['half_day'] * 0.5);
+
         $totalRecords = $records->count();
 
         $studentSummaries = $records
             ->groupBy('student_profile_id')
             ->map(function ($studentRecords) {
-                $counts = $this->statusCounts($studentRecords);
-                $effectiveStudentPresent = $counts['present']
+
+                $counts = $this->statusCounts(
+                    $studentRecords
+                );
+
+                $effectiveStudentPresent =
+                    $counts['present']
                     + $counts['late']
                     + ($counts['half_day'] * 0.5);
-                $studentTotal = $studentRecords->count();
-                $firstRecord = $studentRecords->first();
+
+                $studentTotal =
+                    $studentRecords->count();
+
+                $firstRecord =
+                    $studentRecords->first();
 
                 return [
-                    'student_profile_id' => $firstRecord->student_profile_id,
-                    'student_name' => $firstRecord->studentProfile?->user?->name,
-                    'roll_number' => $firstRecord->studentProfile?->roll_number,
-                    'batch_id' => $firstRecord->batch_id,
-                    'batch_name' => $firstRecord->batch?->name,
-                    'total_records' => $studentTotal,
-                    'status_counts' => $counts,
-                    'attendance_percentage' => $studentTotal > 0
-                        ? round(($effectiveStudentPresent / $studentTotal) * 100, 2)
+                    'student_profile_id' =>
+                    $firstRecord->student_profile_id,
+
+                    'student_name' =>
+                    $firstRecord->studentProfile?->user?->name,
+
+                    'roll_number' =>
+                    $firstRecord->studentProfile?->roll_number,
+
+                    'batch_id' =>
+                    $firstRecord->batch_id,
+
+                    'batch_name' =>
+                    $firstRecord->batch?->name,
+
+                    'total_records' =>
+                    $studentTotal,
+
+                    'status_counts' =>
+                    $counts,
+
+                    'attendance_percentage' =>
+                    $studentTotal > 0
+                        ? round(
+                            ($effectiveStudentPresent / $studentTotal) * 100,
+                            2
+                        )
                         : 0,
                 ];
             })
@@ -212,23 +355,49 @@ class AttendanceRecordController extends Controller
             'message' => 'Attendance report generated successfully.',
             'data' => [
                 'filters' => [
-                    'from_date' => $fromDate,
-                    'to_date' => $toDate,
-                    'institution_id' => $validated['institution_id'] ?? null,
-                    'batch_id' => $validated['batch_id'] ?? null,
-                    'course_id' => $validated['course_id'] ?? null,
-                    'student_profile_id' => $validated['student_profile_id'] ?? null,
-                    'attendance_status' => $validated['attendance_status'] ?? null,
+                    'from_date' =>
+                    $fromDate,
+
+                    'to_date' =>
+                    $toDate,
+
+                    'institution_id' =>
+                    $validated['institution_id'] ?? null,
+
+                    'batch_id' =>
+                    $validated['batch_id'] ?? null,
+
+                    'course_id' =>
+                    $validated['course_id'] ?? null,
+
+                    'student_profile_id' =>
+                    $validated['student_profile_id'] ?? null,
+
+                    'attendance_status' =>
+                    $validated['attendance_status'] ?? null,
                 ],
+
                 'summary' => [
-                    'total_records' => $totalRecords,
-                    'status_counts' => $statusCounts,
-                    'effective_present_count' => $effectivePresent,
-                    'attendance_percentage' => $totalRecords > 0
-                        ? round(($effectivePresent / $totalRecords) * 100, 2)
+                    'total_records' =>
+                    $totalRecords,
+
+                    'status_counts' =>
+                    $statusCounts,
+
+                    'effective_present_count' =>
+                    $effectivePresent,
+
+                    'attendance_percentage' =>
+                    $totalRecords > 0
+                        ? round(
+                            ($effectivePresent / $totalRecords) * 100,
+                            2
+                        )
                         : 0,
                 ],
-                'students' => $studentSummaries,
+
+                'students' =>
+                $studentSummaries,
             ],
         ]);
     }
@@ -268,31 +437,213 @@ class AttendanceRecordController extends Controller
 
     private function filteredQuery(array $filters)
     {
-        return AttendanceRecord::query()
-            ->when($filters['institution_id'] ?? null, function ($query, $institutionId) {
-                $query->where('institution_id', $institutionId);
-            })
-            ->when($filters['batch_id'] ?? null, function ($query, $batchId) {
-                $query->where('batch_id', $batchId);
-            })
-            ->when($filters['course_id'] ?? null, function ($query, $courseId) {
-                $query->where('course_id', $courseId);
-            })
-            ->when($filters['student_profile_id'] ?? null, function ($query, $studentProfileId) {
-                $query->where('student_profile_id', $studentProfileId);
-            })
-            ->when($filters['attendance_status'] ?? null, function ($query, $status) {
-                $query->where('attendance_status', $status);
-            })
-            ->when($filters['date'] ?? null, function ($query, $date) {
-                $query->whereDate('attendance_date', $date);
-            })
-            ->when($filters['from_date'] ?? null, function ($query, $fromDate) {
-                $query->whereDate('attendance_date', '>=', $fromDate);
-            })
-            ->when($filters['to_date'] ?? null, function ($query, $toDate) {
-                $query->whereDate('attendance_date', '<=', $toDate);
-            });
+        /** @var User $user */
+        $user = Auth::user();
+
+        $query = AttendanceRecord::query();
+
+        /*
+    |--------------------------------------------------------------------------
+    | Super Admin
+    |--------------------------------------------------------------------------
+    */
+        if ($user->hasRole('super-admin')) {
+
+            // No restrictions
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Institution Admin
+    |--------------------------------------------------------------------------
+    */ elseif ($user->hasRole('institution-admin')) {
+
+            $institutionUser = InstitutionUser::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (!$institutionUser) {
+
+                abort(
+                    403,
+                    'Institution profile not found.'
+                );
+            }
+
+            $query->where(
+                'institution_id',
+                $institutionUser->institution_id
+            );
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Teacher
+    |--------------------------------------------------------------------------
+    */ elseif ($user->hasRole('teacher')) {
+
+            $teacherProfile = $user->teacherProfile;
+
+            if (!$teacherProfile) {
+
+                abort(
+                    403,
+                    'Teacher profile not found.'
+                );
+            }
+
+            $query->whereHas(
+                'course',
+                function ($q) use ($teacherProfile) {
+
+                    $q->where(
+                        'teacher_profile_id',
+                        $teacherProfile->id
+                    );
+                }
+            );
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Student
+    |--------------------------------------------------------------------------
+    */ elseif ($user->hasRole('student')) {
+
+            $studentProfile = $user->studentProfile;
+
+            if (!$studentProfile) {
+
+                abort(
+                    403,
+                    'Student profile not found.'
+                );
+            }
+
+            $query->where(
+                'student_profile_id',
+                $studentProfile->id
+            );
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Parent
+    |--------------------------------------------------------------------------
+    */ elseif ($user->hasRole('parent')) {
+
+            $parentProfile = $user->parentProfile;
+
+            if (!$parentProfile) {
+
+                abort(
+                    403,
+                    'Parent profile not found.'
+                );
+            }
+
+            $query->where(
+                'student_profile_id',
+                $parentProfile->student_profile_id
+            );
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Unknown Role
+    |--------------------------------------------------------------------------
+    */ else {
+
+            abort(
+                403,
+                'Unauthorized role.'
+            );
+        }
+
+        return $query
+            ->when(
+                $filters['institution_id'] ?? null,
+                function ($query, $institutionId) {
+
+                    $query->where(
+                        'institution_id',
+                        $institutionId
+                    );
+                }
+            )
+            ->when(
+                $filters['batch_id'] ?? null,
+                function ($query, $batchId) {
+
+                    $query->where(
+                        'batch_id',
+                        $batchId
+                    );
+                }
+            )
+            ->when(
+                $filters['course_id'] ?? null,
+                function ($query, $courseId) {
+
+                    $query->where(
+                        'course_id',
+                        $courseId
+                    );
+                }
+            )
+            ->when(
+                $filters['student_profile_id'] ?? null,
+                function ($query, $studentProfileId) {
+
+                    $query->where(
+                        'student_profile_id',
+                        $studentProfileId
+                    );
+                }
+            )
+            ->when(
+                $filters['attendance_status'] ?? null,
+                function ($query, $status) {
+
+                    $query->where(
+                        'attendance_status',
+                        $status
+                    );
+                }
+            )
+            ->when(
+                $filters['date'] ?? null,
+                function ($query, $date) {
+
+                    $query->whereDate(
+                        'attendance_date',
+                        $date
+                    );
+                }
+            )
+            ->when(
+                $filters['from_date'] ?? null,
+                function ($query, $fromDate) {
+
+                    $query->whereDate(
+                        'attendance_date',
+                        '>=',
+                        $fromDate
+                    );
+                }
+            )
+            ->when(
+                $filters['to_date'] ?? null,
+                function ($query, $toDate) {
+
+                    $query->whereDate(
+                        'attendance_date',
+                        '<=',
+                        $toDate
+                    );
+                }
+            );
     }
 
     private function prepareRecordData(
@@ -441,5 +792,186 @@ class AttendanceRecordController extends Controller
                 return [$status => $records->where('attendance_status', $status)->count()];
             })
             ->all();
+    }
+
+    private function authorizeAttendanceRecord(
+        ?AttendanceRecord $attendanceRecord = null,
+        ?Course $course = null,
+        ?StudentProfile $studentProfile = null
+    ): void {
+        /** @var User $user */
+        $user = Auth::user();
+
+        /*
+    |--------------------------------------------------------------------------
+    | Super Admin
+    |--------------------------------------------------------------------------
+    */
+        if ($user->hasRole('super-admin')) {
+            return;
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Institution Admin
+    |--------------------------------------------------------------------------
+    */
+        if ($user->hasRole('institution-admin')) {
+
+            $institutionUser = InstitutionUser::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (!$institutionUser) {
+
+                abort(
+                    403,
+                    'Institution profile not found.'
+                );
+            }
+
+            $institutionId =
+                $attendanceRecord?->institution_id
+                ?? $course?->institution_id
+                ?? $studentProfile?->institution_id;
+
+            if (
+                !$institutionId ||
+                (int)$institutionId !==
+                (int)$institutionUser->institution_id
+            ) {
+
+                abort(
+                    403,
+                    'Unauthorized institution access.'
+                );
+            }
+
+            return;
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Teacher
+    |--------------------------------------------------------------------------
+    */
+        if ($user->hasRole('teacher')) {
+
+            $teacherProfile = $user
+                ->teacherProfile;
+
+            if (!$teacherProfile) {
+
+                abort(
+                    403,
+                    'Teacher profile not found.'
+                );
+            }
+
+            $targetCourse =
+                $course
+                ?? $attendanceRecord?->course;
+
+            if (!$targetCourse) {
+
+                abort(
+                    403,
+                    'Course not found.'
+                );
+            }
+
+            if (
+                (int)$targetCourse->teacher_profile_id !==
+                (int)$teacherProfile->id
+            ) {
+
+                abort(
+                    403,
+                    'Unauthorized course access.'
+                );
+            }
+
+            return;
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Student
+    |--------------------------------------------------------------------------
+    */
+        if ($user->hasRole('student')) {
+
+            $myProfile = $user
+                ->studentProfile;
+
+            if (!$myProfile) {
+
+                abort(
+                    403,
+                    'Student profile not found.'
+                );
+            }
+
+            $targetStudent =
+                $studentProfile
+                ?? $attendanceRecord?->studentProfile;
+
+            if (
+                !$targetStudent ||
+                (int)$targetStudent->id !==
+                (int)$myProfile->id
+            ) {
+
+                abort(
+                    403,
+                    'You can only access your own attendance.'
+                );
+            }
+
+            return;
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | Parent
+    |--------------------------------------------------------------------------
+    */
+        if ($user->hasRole('parent')) {
+
+            $parentProfile = $user
+                ->parentProfile;
+
+            if (!$parentProfile) {
+
+                abort(
+                    403,
+                    'Parent profile not found.'
+                );
+            }
+
+            $targetStudent =
+                $studentProfile
+                ?? $attendanceRecord?->studentProfile;
+
+            if (
+                !$targetStudent ||
+                (int)$targetStudent->id !==
+                (int)$parentProfile->student_profile_id
+            ) {
+
+                abort(
+                    403,
+                    'You can only access your child attendance.'
+                );
+            }
+
+            return;
+        }
+
+        abort(
+            403,
+            'Unauthorized role.'
+        );
     }
 }

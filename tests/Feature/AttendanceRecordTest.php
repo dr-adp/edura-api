@@ -12,6 +12,7 @@ use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
+use App\Models\TeacherProfile;
 
 class AttendanceRecordTest extends TestCase
 {
@@ -24,14 +25,21 @@ class AttendanceRecordTest extends TestCase
             'name' => 'EDURA Academy',
             'code' => 'EDURA',
         ]);
+        $teacherProfile = TeacherProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $teacher->id,
+        ]);
+
         $batch = Batch::create([
             'institution_id' => $institution->id,
             'name' => 'Batch A',
             'code' => 'BATCH-A',
         ]);
+        
         $course = Course::create([
             'institution_id' => $institution->id,
             'batch_id' => $batch->id,
+            'teacher_profile_id' => $teacherProfile->id,
             'title' => 'Mathematics',
             'slug' => 'mathematics',
         ]);
@@ -82,7 +90,7 @@ class AttendanceRecordTest extends TestCase
                 ->exists()
         );
 
-        $this->getJson('/api/attendance-reports?from_date=2026-06-14&to_date=2026-06-14&batch_id='.$batch->id)
+        $this->getJson('/api/attendance-reports?from_date=2026-06-14&to_date=2026-06-14&batch_id=' . $batch->id)
             ->assertOk()
             ->assertJsonPath('data.summary.total_records', 2)
             ->assertJsonPath('data.summary.status_counts.present', 1)
@@ -100,7 +108,9 @@ class AttendanceRecordTest extends TestCase
             'guard_name' => 'web',
             'display_name' => 'Teacher',
         ]);
+
         $user = User::factory()->create();
+
         $user->assignRole($role);
 
         $this->actingAs($user, 'web');

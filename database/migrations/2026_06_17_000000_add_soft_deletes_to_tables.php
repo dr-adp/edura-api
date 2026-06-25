@@ -20,7 +20,6 @@ return new class extends Migration
             'student_profiles',
             'parent_profiles',
             'courses',
-            'course_sections',
             'lessons',
             'course_enrollments',
             'assignments',

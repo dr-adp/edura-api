@@ -28,6 +28,11 @@ class Institution extends Model
         'logo_url',
     ];
 
+    protected $casts = [
+        'created_at' => 'datetime',
+        'updated_at' => 'datetime',
+    ];
+
     public function getLogoUrlAttribute(): ?string
     {
         return $this->logo

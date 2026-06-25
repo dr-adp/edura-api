@@ -26,6 +26,7 @@ return new class extends Migration
                 'active',
                 'inactive'
             ])->default('active');
+            $table->softDeletes();
 
             $table->timestamps();
         });

@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers\Api;
 
+use Illuminate\Support\Facades\DB;
+use App\Services\CourseEnrollmentService;
 use App\Models\CourseEnrollment;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -16,6 +18,12 @@ use App\Models\User;
 
 class CourseEnrollmentController extends Controller
 {
+    protected CourseEnrollmentService $service;
+    public function __construct(
+        CourseEnrollmentService $service
+    ) {
+        $this->service = $service;
+    }
     public function index(): JsonResponse
     {
         /** @var User $user */
@@ -133,7 +141,9 @@ class CourseEnrollmentController extends Controller
             'completed_at' => ['nullable', 'date'],
         ]);
 
-        $validated['enrollment_date'] = $validated['enrollment_date'] ?? now()->toDateString();
+        $validated['enrollment_date'] =
+            $validated['enrollment_date']
+            ?? now()->toDateString();
 
         $course = Course::findOrFail(
             $validated['course_id']
@@ -148,49 +158,9 @@ class CourseEnrollmentController extends Controller
             $studentProfile
         );
 
-        /*
-        |--------------------------------------------------------------------------
-        | Student Self Enrollment Protection
-        |--------------------------------------------------------------------------
-        */
-        $user = Auth::user();
-
-        if ($user->hasRole('student')) {
-
-            $currentStudent = StudentProfile::where(
-                'user_id',
-                $user->id
-            )->first();
-
-            if (
-                !$currentStudent ||
-                (int) $currentStudent->id !==
-                (int) $studentProfile->id
-            ) {
-
-                abort(
-                    403,
-                    'You may only enroll yourself.'
-                );
-            }
-        }
-
-        /*
-        |--------------------------------------------------------------------------
-        | Prevent Enrollment Into Inactive Courses
-        |--------------------------------------------------------------------------
-        */
-        if (
-            isset($course->status) &&
-            $course->status !== 'published'
-        ) {
-
-            abort(
-                422,
-                'Course is not available for enrollment.'
-            );
-        }
-        $enrollment = CourseEnrollment::create($validated);
+        $enrollment = $this->service->create(
+            $validated
+        );
 
         return response()->json([
             'message' => 'Student enrolled in course successfully.',
@@ -198,7 +168,7 @@ class CourseEnrollmentController extends Controller
                 'course',
                 'studentProfile.user',
                 'studentProfile.institution',
-                'studentProfile.batch'
+                'studentProfile.batch',
             ]),
         ], 201);
     }

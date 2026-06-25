@@ -1111,18 +1111,22 @@ class QuizAnswerController extends Controller
         );
     }
 
-    private function recalculateQuizAttempt(QuizAttempt $attempt): void
-    {
+    private function recalculateQuizAttempt(
+        QuizAttempt $attempt
+    ): void {
+
         $attempt->loadMissing([
             'quiz',
+            'answers.questionBank',
         ]);
 
-        $marksObtained = QuizAnswer::where(
-            'quiz_attempt_id',
-            $attempt->id
-        )->sum(
-            'marks_obtained'
-        );
+        /*
+    |--------------------------------------------------------------------------
+    | Marks Calculation
+    |--------------------------------------------------------------------------
+    */
+        $marksObtained = $attempt->answers
+            ->sum('marks_obtained');
 
         $totalMarks = $attempt->total_marks > 0
             ? $attempt->total_marks
@@ -1133,8 +1137,13 @@ class QuizAnswerController extends Controller
             2
         );
 
-        // FIX: Use PERCENTAGE-based comparison, not raw marks
+        /*
+    |--------------------------------------------------------------------------
+    | Pass / Fail
+    |--------------------------------------------------------------------------
+    */
         $passingMarks = $attempt->quiz->passing_marks ?? 0;
+
         $passPercentage = $totalMarks > 0
             ? ($passingMarks / $totalMarks) * 100
             : 0;
@@ -1143,10 +1152,76 @@ class QuizAnswerController extends Controller
             ? 'passed'
             : 'failed';
 
+        /*
+    |--------------------------------------------------------------------------
+    | Manual Evaluation Detection
+    |--------------------------------------------------------------------------
+    */
+        $requiresManualEvaluation = $attempt->answers
+            ->contains(function ($answer) {
+
+                $type = $answer->questionBank?->question_type;
+
+                return in_array(
+                    $type,
+                    [
+                        'short_answer',
+                        'long_answer',
+                        'fill_blank',
+                    ]
+                );
+            });
+
+        /*
+    |--------------------------------------------------------------------------
+    | Unevaluated Manual Answers
+    |--------------------------------------------------------------------------
+    */
+        $pendingManualEvaluation = $attempt->answers
+            ->contains(function ($answer) {
+
+                $type = $answer->questionBank?->question_type;
+
+                if (! in_array(
+                    $type,
+                    [
+                        'short_answer',
+                        'long_answer',
+                        'fill_blank',
+                    ]
+                )) {
+
+                    return false;
+                }
+
+                return $answer->marks_obtained === null;
+            });
+
+        /*
+    |--------------------------------------------------------------------------
+    | Attempt Status
+    |--------------------------------------------------------------------------
+    */
+        $status = $attempt->status;
+
+        if (
+            $status === 'submitted'
+            &&
+            (
+                ! $requiresManualEvaluation
+                ||
+                ! $pendingManualEvaluation
+            )
+        ) {
+
+            $status = 'evaluated';
+        }
+
         $attempt->update([
             'marks_obtained' => $marksObtained,
             'percentage' => $percentage,
             'result_status' => $resultStatus,
+            'status' => $status,
         ]);
     }
 }

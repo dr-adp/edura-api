@@ -32,6 +32,7 @@ return new class extends Migration
             $table->integer('duration_minutes')->default(0);
 
             $table->text('remarks')->nullable();
+            $table->softDeletes();
 
             $table->timestamps();
 

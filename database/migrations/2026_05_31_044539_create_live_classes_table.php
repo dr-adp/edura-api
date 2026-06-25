@@ -44,6 +44,7 @@ return new class extends Migration
                 'completed',
                 'cancelled'
             ])->default('scheduled');
+            $table->softDeletes();
 
             $table->timestamps();
         });

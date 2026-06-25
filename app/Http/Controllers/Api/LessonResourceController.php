@@ -7,23 +7,221 @@ use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Controller;
 use Illuminate\Support\Facades\Storage;
+use App\Models\Lesson;
+use App\Models\InstitutionUser;
+use App\Models\TeacherProfile;
+use App\Models\User;
+use Illuminate\Support\Facades\Auth;
 
 class LessonResourceController extends Controller
 {
+
+    private function authorizeLessonResourceAccess(
+        LessonResource $lessonResource
+    ): void {
+
+        /** @var User $user */
+        $user = Auth::user();
+
+        if ($user->hasRole('super-admin')) {
+            return;
+        }
+
+        $lessonResource->loadMissing(
+            'lesson.course'
+        );
+
+        if ($user->hasRole('institution-admin')) {
+
+            $institutionUser = InstitutionUser::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (
+                !$institutionUser ||
+                (int) $lessonResource->lesson->course->institution_id !==
+                (int) $institutionUser->institution_id
+            ) {
+
+                abort(
+                    403,
+                    'Unauthorized institution access.'
+                );
+            }
+
+            return;
+        }
+
+        if ($user->hasRole('teacher')) {
+
+            $teacherProfile = TeacherProfile::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (
+                !$teacherProfile ||
+                (int) $lessonResource->lesson->course->teacher_profile_id !==
+                (int) $teacherProfile->id
+            ) {
+
+                abort(
+                    403,
+                    'Unauthorized lesson resource.'
+                );
+            }
+
+            return;
+        }
+
+        abort(
+            403,
+            'Unauthorized.'
+        );
+    }
+
+    private function authorizeLessonResourceManagement(
+        Lesson $lesson
+    ): void {
+
+        /** @var User $user */
+        $user = Auth::user();
+
+        if ($user->hasRole('super-admin')) {
+            return;
+        }
+
+        $lesson->loadMissing(
+            'course'
+        );
+
+        if ($user->hasRole('institution-admin')) {
+
+            $institutionUser = InstitutionUser::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (
+                !$institutionUser ||
+                (int) $lesson->course->institution_id !==
+                (int) $institutionUser->institution_id
+            ) {
+
+                abort(
+                    403,
+                    'Unauthorized institution access.'
+                );
+            }
+
+            return;
+        }
+
+        if ($user->hasRole('teacher')) {
+
+            $teacherProfile = TeacherProfile::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (
+                !$teacherProfile ||
+                (int) $lesson->course->teacher_profile_id !==
+                (int) $teacherProfile->id
+            ) {
+
+                abort(
+                    403,
+                    'Unauthorized lesson.'
+                );
+            }
+
+            return;
+        }
+
+        abort(
+            403,
+            'Unauthorized.'
+        );
+    }
+
     public function index(): JsonResponse
     {
-        $resources = LessonResource::with('lesson')
-            ->orderBy('sort_order')
-            ->paginate(20);
+        /** @var User $user */
+        $user = Auth::user();
+
+        $query = LessonResource::with([
+            'lesson.course',
+        ]);
+
+        if ($user->hasRole('super-admin')) {
+
+            // Full access
+
+        } elseif ($user->hasRole('institution-admin')) {
+
+            $institutionUser = InstitutionUser::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (!$institutionUser) {
+                abort(403, 'Institution profile not found.');
+            }
+
+            $query->whereHas(
+                'lesson.course',
+                function ($q) use ($institutionUser) {
+                    $q->where(
+                        'institution_id',
+                        $institutionUser->institution_id
+                    );
+                }
+            );
+        } elseif ($user->hasRole('teacher')) {
+
+            $teacherProfile = TeacherProfile::where(
+                'user_id',
+                $user->id
+            )->first();
+
+            if (!$teacherProfile) {
+                abort(403, 'Teacher profile not found.');
+            }
+
+            $query->whereHas(
+                'lesson.course',
+                function ($q) use ($teacherProfile) {
+                    $q->where(
+                        'teacher_profile_id',
+                        $teacherProfile->id
+                    );
+                }
+            );
+        } else {
+
+            abort(403, 'Unauthorized.');
+        }
 
         return response()->json([
             'message' => 'Lesson resources fetched successfully.',
-            'data' => $resources,
+            'data' => $query
+                ->latest()
+                ->paginate(20),
         ]);
     }
 
     public function store(Request $request): JsonResponse
     {
+        /** @var User $user */
+        $user = Auth::user();
+
+        /*
+    |--------------------------------------------------------------------------
+    | Validation
+    |--------------------------------------------------------------------------
+    */
         $validated = $request->validate([
             'lesson_id' => ['required', 'exists:lessons,id'],
             'title' => ['required', 'string', 'max:255'],
@@ -41,42 +239,101 @@ class LessonResourceController extends Controller
                 'nullable',
                 'file',
                 'mimes:pdf,doc,docx,ppt,pptx,jpg,jpeg,png,webp,mp4,mov,avi,mkv,webm',
-                'max:512000'
+                'max:512000',
             ],
 
             'sort_order' => ['nullable', 'integer'],
             'status' => ['nullable', 'in:active,inactive'],
         ]);
 
-        if ($request->hasFile('file')) {
-            $validated['file_path'] = $request->file('file')->store('lesson-resources', 'public');
+        /*
+    |--------------------------------------------------------------------------
+    | Load Lesson
+    |--------------------------------------------------------------------------
+    */
+        $lesson = Lesson::with('course')->findOrFail(
+            $validated['lesson_id']
+        );
 
-            if (($validated['resource_type'] ?? null) === 'video') {
-                $validated['video_provider'] = $validated['video_provider'] ?? 'local';
-                $validated['video_size_mb'] = round($request->file('file')->getSize() / 1024 / 1024, 2);
-            }
+        /*
+    |--------------------------------------------------------------------------
+    | Authorization
+    |--------------------------------------------------------------------------
+    */
+        $this->authorizeLessonResourceManagement(
+            $lesson
+        );
+
+        /*
+    |--------------------------------------------------------------------------
+    | File Upload
+    |--------------------------------------------------------------------------
+    */
+        if ($request->hasFile('file')) {
+            $validated['file_path'] = $request
+                ->file('file')
+                ->store('lesson-resources', 'public');
         }
 
         unset($validated['file']);
 
-        $resource = LessonResource::create($validated);
+        /*
+    |--------------------------------------------------------------------------
+    | Create
+    |--------------------------------------------------------------------------
+    */
+        $lessonResource = LessonResource::create(
+            $validated
+        );
 
         return response()->json([
             'message' => 'Lesson resource created successfully.',
-            'data' => $resource->load('lesson'),
+            'data' => $lessonResource->load([
+                'lesson.course',
+            ]),
         ], 201);
     }
 
-    public function show(LessonResource $lessonResource): JsonResponse
-    {
+    public function show(
+        LessonResource $lessonResource
+    ): JsonResponse {
+
+        /*
+    |--------------------------------------------------------------------------
+    | Authorization
+    |--------------------------------------------------------------------------
+    */
+        $this->authorizeLessonResourceAccess(
+            $lessonResource
+        );
+
         return response()->json([
             'message' => 'Lesson resource fetched successfully.',
-            'data' => $lessonResource->load('lesson'),
+            'data' => $lessonResource->load([
+                'lesson.course',
+            ]),
         ]);
     }
 
-    public function update(Request $request, LessonResource $lessonResource): JsonResponse
-    {
+    public function update(
+        Request $request,
+        LessonResource $lessonResource
+    ): JsonResponse {
+
+        /*
+    |--------------------------------------------------------------------------
+    | Authorization
+    |--------------------------------------------------------------------------
+    */
+        $this->authorizeLessonResourceAccess(
+            $lessonResource
+        );
+
+        /*
+    |--------------------------------------------------------------------------
+    | Validation
+    |--------------------------------------------------------------------------
+    */
         $validated = $request->validate([
             'lesson_id' => ['sometimes', 'exists:lessons,id'],
             'title' => ['sometimes', 'string', 'max:255'],
@@ -94,42 +351,80 @@ class LessonResourceController extends Controller
                 'nullable',
                 'file',
                 'mimes:pdf,doc,docx,ppt,pptx,jpg,jpeg,png,webp,mp4,mov,avi,mkv,webm',
-                'max:512000'
+                'max:512000',
             ],
 
             'sort_order' => ['nullable', 'integer'],
             'status' => ['nullable', 'in:active,inactive'],
         ]);
 
+        /*
+    |--------------------------------------------------------------------------
+    | Lesson Change Authorization
+    |--------------------------------------------------------------------------
+    */
+        if (isset($validated['lesson_id'])) {
+
+            $lesson = Lesson::with('course')->findOrFail(
+                $validated['lesson_id']
+            );
+
+            $this->authorizeLessonResourceManagement(
+                $lesson
+            );
+        }
+
+        /*
+    |--------------------------------------------------------------------------
+    | File Upload
+    |--------------------------------------------------------------------------
+    */
         if ($request->hasFile('file')) {
-            if ($lessonResource->file_path && Storage::disk('public')->exists($lessonResource->file_path)) {
-                Storage::disk('public')->delete($lessonResource->file_path);
-            }
 
-            $validated['file_path'] = $request->file('file')->store('lesson-resources', 'public');
-
-            if (($validated['resource_type'] ?? $lessonResource->resource_type) === 'video') {
-                $validated['video_provider'] = $validated['video_provider'] ?? 'local';
-                $validated['video_size_mb'] = round($request->file('file')->getSize() / 1024 / 1024, 2);
-            }
+            $validated['file_path'] = $request
+                ->file('file')
+                ->store('lesson-resources', 'public');
         }
 
         unset($validated['file']);
 
-        $lessonResource->update($validated);
+        /*
+    |--------------------------------------------------------------------------
+    | Update
+    |--------------------------------------------------------------------------
+    */
+        $lessonResource->update(
+            $validated
+        );
 
         return response()->json([
             'message' => 'Lesson resource updated successfully.',
-            'data' => $lessonResource->fresh()->load('lesson'),
+            'data' => $lessonResource
+                ->fresh()
+                ->load([
+                    'lesson.course',
+                ]),
         ]);
     }
 
-    public function destroy(LessonResource $lessonResource): JsonResponse
-    {
-        if ($lessonResource->file_path && Storage::disk('public')->exists($lessonResource->file_path)) {
-            Storage::disk('public')->delete($lessonResource->file_path);
-        }
+    public function destroy(
+        LessonResource $lessonResource
+    ): JsonResponse {
 
+        /*
+    |--------------------------------------------------------------------------
+    | Authorization
+    |--------------------------------------------------------------------------
+    */
+        $this->authorizeLessonResourceAccess(
+            $lessonResource
+        );
+
+        /*
+    |--------------------------------------------------------------------------
+    | Soft Delete
+    |--------------------------------------------------------------------------
+    */
         $lessonResource->delete();
 
         return response()->json([

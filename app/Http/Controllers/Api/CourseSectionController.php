@@ -5,14 +5,14 @@ namespace App\Http\Controllers\Api;
 use App\Models\CourseSection;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use App\Models\Course;
 use App\Models\InstitutionUser;
 use App\Models\TeacherProfile;
 use App\Models\User;
 use Illuminate\Support\Facades\Auth;
 
-class CourseSectionController extends Controller
+class CourseSectionController extends BaseApiController
 {
     private function authorizeCourseSectionAccess(
         CourseSection $courseSection
@@ -173,12 +173,14 @@ class CourseSectionController extends Controller
             abort(403, 'Unauthorized.');
         }
 
-        return response()->json([
-            'message' => 'Course sections fetched successfully.',
-            'data' => $query
-                ->orderBy('sort_order')
-                ->paginate(20),
-        ]);
+        $courseSections = $query
+            ->orderBy('sort_order')
+            ->paginate(20);
+
+        return $this->successResponse(
+            $courseSections,
+            'Course sections fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -223,12 +225,13 @@ class CourseSectionController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Course section created successfully.',
-            'data' => $courseSection->load([
+        return $this->successResponse(
+            $courseSection->load([
                 'course',
             ]),
-        ], 201);
+            'Course section created successfully.',
+            201
+        );
     }
 
     public function show(
@@ -244,12 +247,12 @@ class CourseSectionController extends Controller
             $courseSection
         );
 
-        return response()->json([
-            'message' => 'Course section fetched successfully.',
-            'data' => $courseSection->load([
+        return $this->successResponse(
+            $courseSection->load([
                 'course',
             ]),
-        ]);
+            'Course section fetched successfully.'
+        );
     }
 
     public function update(
@@ -304,14 +307,14 @@ class CourseSectionController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Course section updated successfully.',
-            'data' => $courseSection
+        return $this->successResponse(
+            $courseSection
                 ->fresh()
                 ->load([
                     'course',
                 ]),
-        ]);
+            'Course section updated successfully.'
+        );
     }
 
     public function destroy(
@@ -349,8 +352,9 @@ class CourseSectionController extends Controller
     */
         $courseSection->delete();
 
-        return response()->json([
-            'message' => 'Course section deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Course section deleted successfully.'
+        );
     }
 }

@@ -10,7 +10,6 @@ use App\Http\Controllers\Api\BaseApiController;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
 use App\Models\InstitutionUser;
-use App\Models\TeacherProfile;
 
 class CourseController extends BaseApiController
 {
@@ -197,15 +196,16 @@ class CourseController extends BaseApiController
             $validated
         );
 
-        return response()->json([
-            'message' => 'Course created successfully.',
-            'data' => $course->load([
+        return $this->successResponse(
+            $course->load([
                 'institution',
                 'department',
                 'batch',
                 'teacherProfile.user'
             ]),
-        ], 201);
+            'Course created successfully.',
+            201
+        );
     }
 
     public function show(Course $course): JsonResponse
@@ -214,15 +214,15 @@ class CourseController extends BaseApiController
             course: $course
         );
 
-        return response()->json([
-            'message' => 'Course fetched successfully.',
-            'data' => $course->load([
+        return $this->successResponse(
+            $course->load([
                 'institution',
                 'department',
                 'batch',
                 'teacherProfile.user'
             ]),
-        ]);
+            'Course fetched successfully.'
+        );
     }
 
     public function update(Request $request, Course $course): JsonResponse
@@ -347,9 +347,8 @@ class CourseController extends BaseApiController
             $validated
         );
 
-        return response()->json([
-            'message' => 'Course updated successfully.',
-            'data' => $course
+        return $this->successResponse(
+            $course
                 ->fresh()
                 ->load([
                     'institution',
@@ -357,7 +356,8 @@ class CourseController extends BaseApiController
                     'batch',
                     'teacherProfile.user'
                 ]),
-        ]);
+            'Course updated successfully.'
+        );
     }
 
     public function destroy(Course $course): JsonResponse
@@ -373,9 +373,10 @@ class CourseController extends BaseApiController
 
         $course->delete();
 
-        return response()->json([
-            'message' => 'Course deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Course deleted successfully.'
+        );
     }
 
     private function authorizeCourseAccess(

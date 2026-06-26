@@ -5,7 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Models\LessonResource;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use Illuminate\Support\Facades\Storage;
 use App\Models\Lesson;
 use App\Models\InstitutionUser;
@@ -13,7 +13,7 @@ use App\Models\TeacherProfile;
 use App\Models\User;
 use Illuminate\Support\Facades\Auth;
 
-class LessonResourceController extends Controller
+class LessonResourceController extends BaseApiController
 {
 
     private function authorizeLessonResourceAccess(
@@ -204,12 +204,14 @@ class LessonResourceController extends Controller
             abort(403, 'Unauthorized.');
         }
 
-        return response()->json([
-            'message' => 'Lesson resources fetched successfully.',
-            'data' => $query
-                ->latest()
-                ->paginate(20),
-        ]);
+        $resources = $query
+            ->latest()
+            ->paginate(20);
+
+        return $this->successResponse(
+            $resources,
+            'Lesson resources fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -286,12 +288,13 @@ class LessonResourceController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Lesson resource created successfully.',
-            'data' => $lessonResource->load([
-                'lesson.course',
+        return $this->successResponse(
+            $lessonResource->load([
+                'lesson'
             ]),
-        ], 201);
+            'Lesson resource created successfully.',
+            201
+        );
     }
 
     public function show(
@@ -307,12 +310,12 @@ class LessonResourceController extends Controller
             $lessonResource
         );
 
-        return response()->json([
-            'message' => 'Lesson resource fetched successfully.',
-            'data' => $lessonResource->load([
-                'lesson.course',
+        return $this->successResponse(
+            $lessonResource->load([
+                'lesson'
             ]),
-        ]);
+            'Lesson resource fetched successfully.'
+        );
     }
 
     public function update(
@@ -397,14 +400,14 @@ class LessonResourceController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Lesson resource updated successfully.',
-            'data' => $lessonResource
+        return $this->successResponse(
+            $lessonResource
                 ->fresh()
                 ->load([
-                    'lesson.course',
+                    'lesson'
                 ]),
-        ]);
+            'Lesson resource updated successfully.'
+        );
     }
 
     public function destroy(
@@ -427,8 +430,9 @@ class LessonResourceController extends Controller
     */
         $lessonResource->delete();
 
-        return response()->json([
-            'message' => 'Lesson resource deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Lesson resource deleted successfully.'
+        );
     }
 }

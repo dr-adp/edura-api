@@ -5,13 +5,13 @@ namespace App\Http\Controllers\Api;
 use App\Models\Lesson;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use App\Models\User;
 use App\Models\Course;
 use App\Models\InstitutionUser;
 use Illuminate\Support\Facades\Auth;
 
-class LessonController extends Controller
+class LessonController extends BaseApiController
 {
     public function index(): JsonResponse
     {
@@ -99,10 +99,10 @@ class LessonController extends Controller
             ->orderBy('sort_order')
             ->paginate(20);
 
-        return response()->json([
-            'message' => 'Lessons fetched successfully.',
-            'data' => $lessons,
-        ]);
+        return $this->successResponse(
+            $lessons,
+            'Lessons fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -169,13 +169,14 @@ class LessonController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Lesson created successfully.',
-            'data' => $lesson->load([
+        return $this->successResponse(
+            $lesson->load([
                 'course',
                 'courseSection'
             ]),
-        ], 201);
+            'Lesson created successfully.',
+            201
+        );
     }
 
     public function show(Lesson $lesson): JsonResponse
@@ -184,13 +185,13 @@ class LessonController extends Controller
             lesson: $lesson
         );
 
-        return response()->json([
-            'message' => 'Lesson fetched successfully.',
-            'data' => $lesson->load([
+        return $this->successResponse(
+            $lesson->load([
                 'course',
                 'courseSection'
             ]),
-        ]);
+            'Lesson fetched successfully.'
+        );
     }
 
     public function update(Request $request, Lesson $lesson): JsonResponse
@@ -269,15 +270,15 @@ class LessonController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Lesson updated successfully.',
-            'data' => $lesson
+        return $this->successResponse(
+            $lesson
                 ->fresh()
                 ->load([
                     'course',
                     'courseSection'
                 ]),
-        ]);
+            'Lesson updated successfully.'
+        );
     }
 
     public function destroy(Lesson $lesson): JsonResponse
@@ -293,9 +294,10 @@ class LessonController extends Controller
 
         $lesson->delete();
 
-        return response()->json([
-            'message' => 'Lesson deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Lesson deleted successfully.'
+        );
     }
 
     private function authorizeLessonAccess(

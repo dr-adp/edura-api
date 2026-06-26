@@ -8,7 +8,7 @@ use App\Models\CourseEnrollment;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\Rule;
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use App\Models\Course;
 use App\Models\InstitutionUser;
 use App\Models\StudentProfile;
@@ -16,7 +16,7 @@ use App\Models\TeacherProfile;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
 
-class CourseEnrollmentController extends Controller
+class CourseEnrollmentController extends BaseApiController
 {
     protected CourseEnrollmentService $service;
     public function __construct(
@@ -115,10 +115,10 @@ class CourseEnrollmentController extends Controller
             ->latest()
             ->paginate(20);
 
-        return response()->json([
-            'message' => 'Course enrollments fetched successfully.',
-            'data' => $enrollments,
-        ]);
+        return $this->successResponse(
+            $enrollments,
+            'Course enrollments fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -162,15 +162,16 @@ class CourseEnrollmentController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Student enrolled in course successfully.',
-            'data' => $enrollment->load([
+        return $this->successResponse(
+            $enrollment->load([
                 'course',
                 'studentProfile.user',
                 'studentProfile.institution',
                 'studentProfile.batch',
             ]),
-        ], 201);
+            'Student enrolled in course successfully.',
+            201
+        );
     }
 
     public function show(
@@ -181,15 +182,15 @@ class CourseEnrollmentController extends Controller
             $courseEnrollment
         );
 
-        return response()->json([
-            'message' => 'Course enrollment fetched successfully.',
-            'data' => $courseEnrollment->load([
+        return $this->successResponse(
+            $courseEnrollment->load([
                 'course',
                 'studentProfile.user',
                 'studentProfile.institution',
                 'studentProfile.batch',
             ]),
-        ]);
+            'Course enrollment fetched successfully.'
+        );
     }
 
     public function update(
@@ -384,9 +385,8 @@ class CourseEnrollmentController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Course enrollment updated successfully.',
-            'data' => $courseEnrollment
+        return $this->successResponse(
+            $courseEnrollment
                 ->fresh()
                 ->load([
                     'course',
@@ -394,7 +394,8 @@ class CourseEnrollmentController extends Controller
                     'studentProfile.institution',
                     'studentProfile.batch',
                 ]),
-        ]);
+            'Course enrollment updated successfully.'
+        );
     }
 
     public function destroy(
@@ -461,9 +462,10 @@ class CourseEnrollmentController extends Controller
     */
         $courseEnrollment->delete();
 
-        return response()->json([
-            'message' => 'Course enrollment deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Course enrollment deleted successfully.'
+        );
     }
 
     private function authorizeCourseEnrollmentAccess(

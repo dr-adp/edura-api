@@ -6,13 +6,13 @@ use App\Models\Course;
 use Illuminate\Support\Str;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
 use App\Models\InstitutionUser;
 use App\Models\TeacherProfile;
 
-class CourseController extends Controller
+class CourseController extends BaseApiController
 {
     public function index(): JsonResponse
     {
@@ -90,10 +90,10 @@ class CourseController extends Controller
             ->latest()
             ->paginate(10);
 
-        return response()->json([
-            'message' => 'Courses fetched successfully.',
-            'data' => $courses,
-        ]);
+        return $this->successResponse(
+            $courses,
+            'Courses fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse

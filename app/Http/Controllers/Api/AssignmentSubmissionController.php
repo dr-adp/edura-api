@@ -7,13 +7,13 @@ use App\Models\AssignmentSubmission;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\Rule;
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
 use App\Models\InstitutionUser;
 
-class AssignmentSubmissionController extends Controller
+class AssignmentSubmissionController extends BaseApiController
 {
     public function index(): JsonResponse
     {
@@ -154,10 +154,12 @@ class AssignmentSubmissionController extends Controller
             );
         }
 
-        return response()->json([
-            'message' => 'Assignment submissions fetched successfully.',
-            'data' => $query->paginate(20),
-        ]);
+        $submissions = $query->paginate(20);
+
+        return $this->successResponse(
+            $submissions,
+            'Assignment submissions fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -324,14 +326,15 @@ class AssignmentSubmissionController extends Controller
 
         $submission = AssignmentSubmission::create($validated);
 
-        return response()->json([
-            'message' => 'Assignment submission created successfully.',
-            'data' => $submission->load([
+        return $this->successResponse(
+            $submission->load([
                 'assignment.course',
                 'studentProfile.user',
                 'studentProfile.batch'
             ]),
-        ], 201);
+            'Assignment submission created successfully.',
+            201
+        );
     }
 
     public function show(
@@ -467,10 +470,10 @@ class AssignmentSubmissionController extends Controller
             );
         }
 
-        return response()->json([
-            'message' => 'Assignment submission fetched successfully.',
-            'data' => $assignmentSubmission,
-        ]);
+        return $this->successResponse(
+            $assignmentSubmission,
+            'Assignment submission fetched successfully.'
+        );
     }
 
     public function update(
@@ -624,16 +627,16 @@ class AssignmentSubmissionController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Assignment submission updated successfully.',
-            'data' => $assignmentSubmission
+        return $this->successResponse(
+            $assignmentSubmission
                 ->fresh()
                 ->load([
                     'assignment.course',
                     'studentProfile.user',
                     'studentProfile.batch'
                 ]),
-        ]);
+            'Assignment submission updated successfully.'
+        );
     }
 
     public function destroy(
@@ -719,9 +722,10 @@ class AssignmentSubmissionController extends Controller
 
         $assignmentSubmission->delete();
 
-        return response()->json([
-            'message' => 'Assignment submission deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Assignment submission deleted successfully.'
+        );
     }
 
     private function checkIfLate(int $assignmentId): bool

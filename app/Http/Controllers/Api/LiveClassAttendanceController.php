@@ -6,7 +6,7 @@ use App\Models\LiveClassAttendance;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\Rule;
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use App\Models\LiveClass;
 use App\Models\InstitutionUser;
 use App\Models\StudentProfile;
@@ -14,7 +14,7 @@ use App\Models\TeacherProfile;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
 
-class LiveClassAttendanceController extends Controller
+class LiveClassAttendanceController extends BaseApiController
 {
     public function index(): JsonResponse
     {
@@ -142,10 +142,10 @@ class LiveClassAttendanceController extends Controller
             ->latest()
             ->paginate(20);
 
-        return response()->json([
-            'message' => 'Live class attendance fetched successfully.',
-            'data' => $attendance,
-        ]);
+        return $this->successResponse(
+            $attendance,
+            'Live class attendance fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -237,15 +237,16 @@ class LiveClassAttendanceController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Live class attendance recorded successfully.',
-            'data' => $attendance->load([
+        return $this->successResponse(
+            $attendance->load([
                 'liveClass',
                 'studentProfile.user',
                 'studentProfile.institution',
                 'studentProfile.batch',
             ]),
-        ], 201);
+            'Live class attendance recorded successfully.',
+            201
+        );
     }
 
     public function show(
@@ -261,15 +262,15 @@ class LiveClassAttendanceController extends Controller
             $liveClassAttendance
         );
 
-        return response()->json([
-            'message' => 'Live class attendance fetched successfully.',
-            'data' => $liveClassAttendance->load([
+        return $this->successResponse(
+            $liveClassAttendance->load([
                 'liveClass',
                 'studentProfile.user',
                 'studentProfile.institution',
                 'studentProfile.batch',
             ]),
-        ]);
+            'Live class attendance fetched successfully.'
+        );
     }
 
     public function update(
@@ -332,9 +333,8 @@ class LiveClassAttendanceController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Live class attendance updated successfully.',
-            'data' => $liveClassAttendance
+        return $this->successResponse(
+            $liveClassAttendance
                 ->fresh()
                 ->load([
                     'liveClass',
@@ -342,7 +342,8 @@ class LiveClassAttendanceController extends Controller
                     'studentProfile.institution',
                     'studentProfile.batch',
                 ]),
-        ]);
+            'Live class attendance updated successfully.'
+        );
     }
 
     public function destroy(
@@ -385,9 +386,10 @@ class LiveClassAttendanceController extends Controller
     */
         $liveClassAttendance->delete();
 
-        return response()->json([
-            'message' => 'Live class attendance deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Live class attendance deleted successfully.'
+        );
     }
 
     private function authorizeLiveClassAttendanceAccess(

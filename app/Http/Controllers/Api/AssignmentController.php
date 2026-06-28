@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use App\Models\Assignment;
 use App\Models\Course;
 use App\Models\InstitutionUser;
@@ -11,7 +11,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
 
-class AssignmentController extends Controller
+class AssignmentController extends BaseApiController
 {
     public function index(): JsonResponse
     {
@@ -44,10 +44,10 @@ class AssignmentController extends Controller
             ->latest()
             ->paginate(20);
 
-        return response()->json([
-            'message' => 'Assignments fetched successfully.',
-            'data' => $assignments,
-        ]);
+        return $this->successResponse(
+            $assignments,
+            'Assignments fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -126,28 +126,29 @@ class AssignmentController extends Controller
 
         $assignment = Assignment::create($validated);
 
-        return response()->json([
-            'message' => 'Assignment created successfully.',
-            'data' => $assignment->load([
+        return $this->successResponse(
+            $assignment->load([
                 'course',
                 'courseSection',
                 'lesson',
                 'teacherProfile.user'
             ]),
-        ], 201);
+            'Assignment created successfully.',
+            201
+        );
     }
 
     public function show(Assignment $assignment): JsonResponse
     {
-        return response()->json([
-            'message' => 'Assignment fetched successfully.',
-            'data' => $assignment->load([
+        return $this->successResponse(
+            $assignment->load([
                 'course',
                 'courseSection',
                 'lesson',
                 'teacherProfile.user'
             ]),
-        ]);
+            'Assignment fetched successfully.'
+        );
     }
 
     public function update(
@@ -190,15 +191,15 @@ class AssignmentController extends Controller
 
         $assignment->update($validated);
 
-        return response()->json([
-            'message' => 'Assignment updated successfully.',
-            'data' => $assignment->fresh()->load([
+        return $this->successResponse(
+            $assignment->fresh()->load([
                 'course',
                 'courseSection',
                 'lesson',
                 'teacherProfile.user'
             ]),
-        ]);
+            'Assignment updated successfully.'
+        );
     }
 
     public function destroy(
@@ -226,8 +227,9 @@ class AssignmentController extends Controller
 
         $assignment->delete();
 
-        return response()->json([
-            'message' => 'Assignment deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Assignment deleted successfully.'
+        );
     }
 }

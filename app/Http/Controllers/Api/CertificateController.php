@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use App\Models\Certificate;
 use App\Models\CertificateSetting;
 use App\Models\Course;
@@ -22,7 +22,7 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
-class CertificateController extends Controller
+class CertificateController extends BaseApiController
 {
     private const CERTIFICATE_RELATIONS = [
         'course.institution',
@@ -49,10 +49,14 @@ class CertificateController extends Controller
         */
         $this->scopeCertificateQuery($query, $user);
 
-        return response()->json([
-            'message' => 'Certificates fetched successfully.',
-            'data' => $query->latest()->paginate(20),
-        ]);
+        $certificates = $query
+            ->latest()
+            ->paginate(20);
+
+        return $this->successResponse(
+            $certificates,
+            'Certificates fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -108,7 +112,7 @@ class CertificateController extends Controller
             [
                 'gradebook_id' => $gradebook->id,
                 'certificate_number' => $existingCertificate?->certificate_number
-                    ?? 'EDURA-'.strtoupper(Str::random(10)),
+                    ?? 'EDURA-' . strtoupper(Str::random(10)),
                 'certificate_uuid' => $existingCertificate?->certificate_uuid
                     ?? (string) Str::uuid(),
                 'verification_token' => $existingCertificate?->verification_token
@@ -124,20 +128,21 @@ class CertificateController extends Controller
 
         $this->generateCertificatePdf($certificate);
 
-        return response()->json([
-            'message' => 'Certificate issued successfully.',
-            'data' => $certificate->fresh()->load(self::CERTIFICATE_RELATIONS),
-        ], 201);
+        return $this->successResponse(
+            $certificate->fresh()->load(self::CERTIFICATE_RELATIONS),
+            'Certificate issued successfully.',
+            201
+        );
     }
 
     public function show(Certificate $certificate): JsonResponse
     {
         $this->authorizeCertificateAccess($certificate);
 
-        return response()->json([
-            'message' => 'Certificate fetched successfully.',
-            'data' => $certificate->load(self::CERTIFICATE_RELATIONS),
-        ]);
+        return $this->successResponse(
+            $certificate->load(self::CERTIFICATE_RELATIONS),
+            'Certificate fetched successfully.'
+        );
     }
 
     public function update(Request $request, Certificate $certificate): JsonResponse
@@ -152,10 +157,10 @@ class CertificateController extends Controller
 
         $certificate->update($validated);
 
-        return response()->json([
-            'message' => 'Certificate updated successfully.',
-            'data' => $certificate->fresh()->load(self::CERTIFICATE_RELATIONS),
-        ]);
+        return $this->successResponse(
+            $certificate->fresh()->load(self::CERTIFICATE_RELATIONS),
+            'Certificate updated successfully.'
+        );
     }
 
     public function destroy(Certificate $certificate): JsonResponse
@@ -171,9 +176,10 @@ class CertificateController extends Controller
 
         $certificate->delete();
 
-        return response()->json([
-            'message' => 'Certificate deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Certificate deleted successfully.'
+        );
     }
 
     public function generate(Certificate $certificate): JsonResponse
@@ -182,10 +188,10 @@ class CertificateController extends Controller
 
         $this->generateCertificatePdf($certificate);
 
-        return response()->json([
-            'message' => 'Certificate PDF generated successfully.',
-            'data' => $certificate->fresh()->load(self::CERTIFICATE_RELATIONS),
-        ]);
+        return $this->successResponse(
+            $certificate->fresh()->load(self::CERTIFICATE_RELATIONS),
+            'Certificate PDF generated successfully.'
+        );
     }
 
     public function download(Certificate $certificate)
@@ -259,11 +265,11 @@ class CertificateController extends Controller
         }
 
         $verificationUrl = $setting?->verification_url
-            ? rtrim($setting->verification_url, '/').'/'.$certificate->verification_token
-            : url('/api/verify-certificate/'.$certificate->verification_token);
+            ? rtrim($setting->verification_url, '/') . '/' . $certificate->verification_token
+            : url('/api/verify-certificate/' . $certificate->verification_token);
 
-        $fileName = 'certificate-'.$certificate->certificate_number.'.pdf';
-        $filePath = 'certificates/'.$fileName;
+        $fileName = 'certificate-' . $certificate->certificate_number . '.pdf';
+        $filePath = 'certificates/' . $fileName;
 
         $pdf = Pdf::loadView('certificates.template', [
             'certificate' => $certificate,
@@ -373,9 +379,9 @@ class CertificateController extends Controller
                 $certificate->course &&
                 $certificate->studentProfile &&
                 (int) $certificate->course->institution_id ===
-                    (int) $institutionUser->institution_id &&
+                (int) $institutionUser->institution_id &&
                 (int) $certificate->studentProfile->institution_id ===
-                    (int) $institutionUser->institution_id
+                (int) $institutionUser->institution_id
             ) {
                 return;
             }
@@ -389,7 +395,7 @@ class CertificateController extends Controller
             if (
                 $certificate->course &&
                 (int) $certificate->course->teacher_profile_id ===
-                    (int) $teacherProfile->id &&
+                (int) $teacherProfile->id &&
                 $this->studentEnrolledInCourse(
                     (int) $certificate->course_id,
                     (int) $certificate->student_profile_id
@@ -463,7 +469,7 @@ class CertificateController extends Controller
             if (
                 (int) $course->institution_id !== (int) $institutionUser->institution_id ||
                 (int) $studentProfile->institution_id !==
-                    (int) $institutionUser->institution_id
+                (int) $institutionUser->institution_id
             ) {
                 abort(403, 'Unauthorized institution access.');
             }

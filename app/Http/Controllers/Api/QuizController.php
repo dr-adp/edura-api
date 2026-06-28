@@ -5,7 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Models\Quiz;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use App\Models\User;
 use App\Models\Course;
 use App\Models\Lesson;
@@ -13,7 +13,7 @@ use App\Models\InstitutionUser;
 use App\Models\CourseSection;
 use Illuminate\Support\Facades\Auth;
 
-class QuizController extends Controller
+class QuizController extends BaseApiController
 {
     public function index(): JsonResponse
     {
@@ -103,10 +103,10 @@ class QuizController extends Controller
             ->latest()
             ->paginate(20);
 
-        return response()->json([
-            'message' => 'Quizzes fetched successfully.',
-            'data' => $quizzes,
-        ]);
+        return $this->successResponse(
+            $quizzes,
+            'Quizzes fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -206,15 +206,16 @@ class QuizController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Quiz created successfully.',
-            'data' => $quiz->load([
+        return $this->successResponse(
+            $quiz->load([
                 'course',
                 'courseSection',
                 'lesson',
                 'teacherProfile.user'
             ]),
-        ], 201);
+            'Quiz created successfully.',
+            201
+        );
     }
 
     public function show(Quiz $quiz): JsonResponse
@@ -223,15 +224,15 @@ class QuizController extends Controller
             quiz: $quiz
         );
 
-        return response()->json([
-            'message' => 'Quiz fetched successfully.',
-            'data' => $quiz->load([
+        return $this->successResponse(
+            $quiz->load([
                 'course',
                 'courseSection',
                 'lesson',
                 'teacherProfile.user'
             ]),
-        ]);
+            'Quiz fetched successfully.'
+        );
     }
 
     public function update(Request $request, Quiz $quiz): JsonResponse
@@ -342,9 +343,8 @@ class QuizController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Quiz updated successfully.',
-            'data' => $quiz
+        return $this->successResponse(
+            $quiz
                 ->fresh()
                 ->load([
                     'course',
@@ -352,7 +352,8 @@ class QuizController extends Controller
                     'lesson',
                     'teacherProfile.user'
                 ]),
-        ]);
+            'Quiz updated successfully.'
+        );
     }
 
     public function destroy(Quiz $quiz): JsonResponse
@@ -368,9 +369,10 @@ class QuizController extends Controller
 
         $quiz->delete();
 
-        return response()->json([
-            'message' => 'Quiz deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Quiz deleted successfully.'
+        );
     }
 
     private function authorizeQuizAccess(

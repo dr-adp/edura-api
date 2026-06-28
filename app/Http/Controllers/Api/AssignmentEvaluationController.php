@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use App\Models\AssignmentEvaluation;
 use App\Models\AssignmentSubmission;
 use App\Models\CourseEnrollment;
@@ -19,7 +19,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 
-class AssignmentEvaluationController extends Controller
+class AssignmentEvaluationController extends BaseApiController
 {
     private const EVALUATION_RELATIONS = [
         'assignmentSubmission.assignment.course',
@@ -46,10 +46,14 @@ class AssignmentEvaluationController extends Controller
         */
         $this->scopeEvaluationQuery($query, $user);
 
-        return response()->json([
-            'message' => 'Assignment evaluations fetched successfully.',
-            'data' => $query->latest()->paginate(20),
-        ]);
+        $evaluations = $query
+            ->latest()
+            ->paginate(20);
+
+        return $this->successResponse(
+            $evaluations,
+            'Assignment evaluations fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -113,20 +117,21 @@ class AssignmentEvaluationController extends Controller
             return $evaluation;
         });
 
-        return response()->json([
-            'message' => 'Assignment evaluated successfully.',
-            'data' => $evaluation->load(self::EVALUATION_RELATIONS),
-        ], 201);
+        return $this->successResponse(
+            $evaluation->load(self::EVALUATION_RELATIONS),
+            'Assignment evaluated successfully.',
+            201
+        );
     }
 
     public function show(AssignmentEvaluation $assignmentEvaluation): JsonResponse
     {
         $this->authorizeEvaluationAccess($assignmentEvaluation);
 
-        return response()->json([
-            'message' => 'Assignment evaluation fetched successfully.',
-            'data' => $assignmentEvaluation->load(self::EVALUATION_RELATIONS),
-        ]);
+        return $this->successResponse(
+            $assignmentEvaluation->load(self::EVALUATION_RELATIONS),
+            'Assignment evaluation fetched successfully.'
+        );
     }
 
     public function update(
@@ -215,10 +220,10 @@ class AssignmentEvaluationController extends Controller
             }
         });
 
-        return response()->json([
-            'message' => 'Assignment evaluation updated successfully.',
-            'data' => $assignmentEvaluation->fresh()->load(self::EVALUATION_RELATIONS),
-        ]);
+        return $this->successResponse(
+            $assignmentEvaluation->fresh()->load(self::EVALUATION_RELATIONS),
+            'Assignment evaluation updated successfully.'
+        );
     }
 
     public function destroy(AssignmentEvaluation $assignmentEvaluation): JsonResponse
@@ -235,9 +240,10 @@ class AssignmentEvaluationController extends Controller
             ]);
         });
 
-        return response()->json([
-            'message' => 'Assignment evaluation deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Assignment evaluation deleted successfully.'
+        );
     }
 
     /*
@@ -433,9 +439,9 @@ class AssignmentEvaluationController extends Controller
 
             if (
                 (int) $course->institution_id ===
-                    (int) $institutionUser->institution_id &&
+                (int) $institutionUser->institution_id &&
                 (int) $studentProfile->institution_id ===
-                    (int) $institutionUser->institution_id &&
+                (int) $institutionUser->institution_id &&
                 (
                     ! $isMutation ||
                     $this->studentEnrolledInCourse($course->id, $studentProfile->id)
@@ -576,7 +582,7 @@ class AssignmentEvaluationController extends Controller
 
         if (
             (int) $teacherProfile->institution_id !==
-                (int) $institutionUser->institution_id ||
+            (int) $institutionUser->institution_id ||
             (
                 $courseTeacherProfileId &&
                 (int) $teacherProfile->id !== (int) $courseTeacherProfileId

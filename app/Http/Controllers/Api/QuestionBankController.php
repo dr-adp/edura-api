@@ -5,14 +5,14 @@ namespace App\Http\Controllers\Api;
 use App\Models\QuestionBank;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\BaseApiController;
 use App\Models\User;
 use App\Models\Course;
 use App\Models\Lesson;
 use App\Models\InstitutionUser;
 use Illuminate\Support\Facades\Auth;
 
-class QuestionBankController extends Controller
+class QuestionBankController extends BaseApiController
 {
     public function index(): JsonResponse
     {
@@ -100,10 +100,10 @@ class QuestionBankController extends Controller
             ->latest()
             ->paginate(20);
 
-        return response()->json([
-            'message' => 'Question bank fetched successfully.',
-            'data' => $questions,
-        ]);
+        return $this->successResponse(
+            $questions,
+            'Question bank fetched successfully.'
+        );
     }
 
     public function store(Request $request): JsonResponse
@@ -164,13 +164,14 @@ class QuestionBankController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Question created successfully.',
-            'data' => $question->load([
+        return $this->successResponse(
+            $question->load([
                 'course',
                 'lesson'
             ]),
-        ], 201);
+            'Question created successfully.',
+            201
+        );
     }
 
     public function show(QuestionBank $questionBank): JsonResponse
@@ -179,13 +180,13 @@ class QuestionBankController extends Controller
             questionBank: $questionBank
         );
 
-        return response()->json([
-            'message' => 'Question fetched successfully.',
-            'data' => $questionBank->load([
+        return $this->successResponse(
+            $questionBank->load([
                 'course',
                 'lesson'
             ]),
-        ]);
+            'Question fetched successfully.'
+        );
     }
 
     public function update(Request $request, QuestionBank $questionBank): JsonResponse
@@ -255,15 +256,15 @@ class QuestionBankController extends Controller
             $validated
         );
 
-        return response()->json([
-            'message' => 'Question updated successfully.',
-            'data' => $questionBank
+        return $this->successResponse(
+            $questionBank
                 ->fresh()
                 ->load([
                     'course',
                     'lesson'
                 ]),
-        ]);
+            'Question updated successfully.'
+        );
     }
 
     public function destroy(QuestionBank $questionBank): JsonResponse
@@ -279,9 +280,10 @@ class QuestionBankController extends Controller
 
         $questionBank->delete();
 
-        return response()->json([
-            'message' => 'Question deleted successfully.',
-        ]);
+        return $this->successResponse(
+            null,
+            'Question deleted successfully.'
+        );
     }
 
     private function authorizeQuestionBankAccess(

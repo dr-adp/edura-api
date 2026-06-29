@@ -312,9 +312,11 @@ class CourseEnrollmentController extends BaseApiController
             );
         }
 
-        $courseEnrollment->update(
+        $courseEnrollment->fill(
             $validated
         );
+
+        $courseEnrollment->save();
 
         return $this->successResponse(
             $courseEnrollment

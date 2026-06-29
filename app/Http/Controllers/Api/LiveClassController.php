@@ -12,6 +12,8 @@ use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use App\Http\Requests\StoreLiveClassRequest;
+use App\Http\Requests\UpdateLiveClassRequest;
 
 class LiveClassController extends BaseApiController
 {
@@ -108,7 +110,7 @@ class LiveClassController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreLiveClassRequest $request): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
@@ -118,28 +120,7 @@ class LiveClassController extends BaseApiController
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'institution_id' => ['nullable', 'exists:institutions,id'],
-            'course_id' => ['required', 'exists:courses,id'],
-            'course_section_id' => ['nullable', 'exists:course_sections,id'],
-            'lesson_id' => ['nullable', 'exists:lessons,id'],
-            'teacher_profile_id' => ['nullable', 'exists:teacher_profiles,id'],
-            'batch_id' => ['nullable', 'exists:batches,id'],
-
-            'title' => ['required', 'string', 'max:255'],
-            'description' => ['nullable', 'string'],
-
-            'platform' => ['nullable', 'in:google_meet,zoom,jitsi,microsoft_teams,other'],
-            'meeting_url' => ['required', 'string', 'max:1000'],
-            'meeting_id' => ['nullable', 'string', 'max:255'],
-            'meeting_password' => ['nullable', 'string', 'max:255'],
-
-            'scheduled_start_time' => ['required', 'date'],
-            'scheduled_end_time' => ['nullable', 'date', 'after:scheduled_start_time'],
-
-            'recording_url' => ['nullable', 'string', 'max:1000'],
-            'status' => ['nullable', 'in:scheduled,live,completed,cancelled'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -258,7 +239,7 @@ class LiveClassController extends BaseApiController
     }
 
     public function update(
-        Request $request,
+        UpdateLiveClassRequest $request,
         LiveClass $liveClass
     ): JsonResponse {
 
@@ -279,28 +260,7 @@ class LiveClassController extends BaseApiController
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'institution_id' => ['nullable', 'exists:institutions,id'],
-            'course_id' => ['sometimes', 'exists:courses,id'],
-            'course_section_id' => ['nullable', 'exists:course_sections,id'],
-            'lesson_id' => ['nullable', 'exists:lessons,id'],
-            'teacher_profile_id' => ['nullable', 'exists:teacher_profiles,id'],
-            'batch_id' => ['nullable', 'exists:batches,id'],
-
-            'title' => ['sometimes', 'string', 'max:255'],
-            'description' => ['nullable', 'string'],
-
-            'platform' => ['nullable', 'in:google_meet,zoom,jitsi,microsoft_teams,other'],
-            'meeting_url' => ['sometimes', 'string', 'max:1000'],
-            'meeting_id' => ['nullable', 'string', 'max:255'],
-            'meeting_password' => ['nullable', 'string', 'max:255'],
-
-            'scheduled_start_time' => ['sometimes', 'date'],
-            'scheduled_end_time' => ['nullable', 'date', 'after:scheduled_start_time'],
-
-            'recording_url' => ['nullable', 'string', 'max:1000'],
-            'status' => ['nullable', 'in:scheduled,live,completed,cancelled'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -340,9 +300,8 @@ class LiveClassController extends BaseApiController
             }
         }
 
-        $liveClass->update(
-            $validated
-        );
+        $liveClass->fill($validated);
+        $liveClass->save();
 
         return $this->successResponse(
             $liveClass

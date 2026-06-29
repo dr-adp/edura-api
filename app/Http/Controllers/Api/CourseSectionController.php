@@ -11,6 +11,8 @@ use App\Models\InstitutionUser;
 use App\Models\TeacherProfile;
 use App\Models\User;
 use Illuminate\Support\Facades\Auth;
+use App\Http\Requests\StoreCourseSectionRequest;
+use App\Http\Requests\UpdateCourseSectionRequest;
 
 class CourseSectionController extends BaseApiController
 {
@@ -183,20 +185,14 @@ class CourseSectionController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreCourseSectionRequest $request): JsonResponse
     {
         /*
     |--------------------------------------------------------------------------
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'course_id' => ['required', 'exists:courses,id'],
-            'title' => ['required', 'string', 'max:255'],
-            'description' => ['nullable', 'string'],
-            'sort_order' => ['nullable', 'integer'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -256,7 +252,7 @@ class CourseSectionController extends BaseApiController
     }
 
     public function update(
-        Request $request,
+        UpdateCourseSectionRequest $request,
         CourseSection $courseSection
     ): JsonResponse {
 
@@ -274,13 +270,7 @@ class CourseSectionController extends BaseApiController
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'course_id' => ['sometimes', 'exists:courses,id'],
-            'title' => ['sometimes', 'string', 'max:255'],
-            'description' => ['nullable', 'string'],
-            'sort_order' => ['nullable', 'integer'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------

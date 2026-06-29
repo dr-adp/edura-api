@@ -21,6 +21,8 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
+use App\Http\Requests\StoreCertificateRequest;
+use App\Http\Requests\UpdateCertificateRequest;
 
 class CertificateController extends BaseApiController
 {
@@ -59,16 +61,12 @@ class CertificateController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreCertificateRequest $request): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
 
-        $validated = $request->validate([
-            'course_id' => ['required', 'exists:courses,id'],
-            'student_profile_id' => ['required', 'exists:student_profiles,id'],
-            'remarks' => ['nullable', 'string'],
-        ]);
+        $validated = $request->validated();
 
         $course = Course::findOrFail($validated['course_id']);
         $studentProfile = StudentProfile::findOrFail($validated['student_profile_id']);
@@ -145,15 +143,11 @@ class CertificateController extends BaseApiController
         );
     }
 
-    public function update(Request $request, Certificate $certificate): JsonResponse
+    public function update(UpdateCertificateRequest $request, Certificate $certificate): JsonResponse
     {
         $this->authorizeCertificateManagement($certificate);
 
-        $validated = $request->validate([
-            'status' => ['nullable', 'in:pending,issued,revoked'],
-            'verification_status' => ['nullable', 'in:valid,revoked,expired'],
-            'remarks' => ['nullable', 'string'],
-        ]);
+        $validated = $request->validated();
 
         $certificate->update($validated);
 

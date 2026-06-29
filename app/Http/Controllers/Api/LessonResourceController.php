@@ -12,6 +12,8 @@ use App\Models\InstitutionUser;
 use App\Models\TeacherProfile;
 use App\Models\User;
 use Illuminate\Support\Facades\Auth;
+use App\Http\Requests\StoreLessonResourceRequest;
+use App\Http\Requests\UpdateLessonResourceRequest;
 
 class LessonResourceController extends BaseApiController
 {
@@ -214,7 +216,7 @@ class LessonResourceController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreLessonResourceRequest $request): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
@@ -224,29 +226,7 @@ class LessonResourceController extends BaseApiController
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'lesson_id' => ['required', 'exists:lessons,id'],
-            'title' => ['required', 'string', 'max:255'],
-
-            'resource_type' => ['nullable', 'in:text,pdf,video,image,link,document,other'],
-            'video_provider' => ['nullable', 'in:local,youtube,vimeo,bunny,cloudflare,external'],
-
-            'content' => ['nullable', 'string'],
-            'external_url' => ['nullable', 'string', 'max:1000'],
-
-            'video_duration_minutes' => ['nullable', 'integer', 'min:1'],
-            'video_size_mb' => ['nullable', 'numeric', 'min:0'],
-
-            'file' => [
-                'nullable',
-                'file',
-                'mimes:pdf,doc,docx,ppt,pptx,jpg,jpeg,png,webp,mp4,mov,avi,mkv,webm',
-                'max:512000',
-            ],
-
-            'sort_order' => ['nullable', 'integer'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -319,7 +299,7 @@ class LessonResourceController extends BaseApiController
     }
 
     public function update(
-        Request $request,
+        UpdateLessonResourceRequest $request,
         LessonResource $lessonResource
     ): JsonResponse {
 
@@ -337,29 +317,7 @@ class LessonResourceController extends BaseApiController
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'lesson_id' => ['sometimes', 'exists:lessons,id'],
-            'title' => ['sometimes', 'string', 'max:255'],
-
-            'resource_type' => ['nullable', 'in:text,pdf,video,image,link,document,other'],
-            'video_provider' => ['nullable', 'in:local,youtube,vimeo,bunny,cloudflare,external'],
-
-            'content' => ['nullable', 'string'],
-            'external_url' => ['nullable', 'string', 'max:1000'],
-
-            'video_duration_minutes' => ['nullable', 'integer', 'min:1'],
-            'video_size_mb' => ['nullable', 'numeric', 'min:0'],
-
-            'file' => [
-                'nullable',
-                'file',
-                'mimes:pdf,doc,docx,ppt,pptx,jpg,jpeg,png,webp,mp4,mov,avi,mkv,webm',
-                'max:512000',
-            ],
-
-            'sort_order' => ['nullable', 'integer'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------

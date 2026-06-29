@@ -11,6 +11,8 @@ use App\Models\Course;
 use App\Models\Lesson;
 use App\Models\InstitutionUser;
 use Illuminate\Support\Facades\Auth;
+use App\Http\Requests\StoreQuestionBankRequest;
+use App\Http\Requests\UpdateQuestionBankRequest;
 
 class QuestionBankController extends BaseApiController
 {
@@ -106,36 +108,9 @@ class QuestionBankController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreQuestionBankRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'course_id' => ['required', 'exists:courses,id'],
-            'lesson_id' => ['nullable', 'exists:lessons,id'],
-
-            'question_text' => ['required', 'string', 'max:1000'],
-            'question_description' => ['nullable', 'string'],
-
-            'question_type' => [
-                'nullable',
-                'in:mcq,true_false,short_answer,long_answer,fill_blank'
-            ],
-
-            'difficulty' => [
-                'nullable',
-                'in:easy,medium,hard'
-            ],
-
-            'marks' => ['nullable', 'numeric', 'min:0'],
-
-            'topic' => ['nullable', 'string', 'max:255'],
-
-            'explanation' => ['nullable', 'string'],
-
-            'status' => [
-                'nullable',
-                'in:active,inactive'
-            ],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -189,7 +164,7 @@ class QuestionBankController extends BaseApiController
         );
     }
 
-    public function update(Request $request, QuestionBank $questionBank): JsonResponse
+    public function update(UpdateQuestionBankRequest $request, QuestionBank $questionBank): JsonResponse
     {
         /*
     |--------------------------------------------------------------------------
@@ -200,34 +175,7 @@ class QuestionBankController extends BaseApiController
             questionBank: $questionBank
         );
 
-        $validated = $request->validate([
-            'course_id' => ['sometimes', 'exists:courses,id'],
-            'lesson_id' => ['nullable', 'exists:lessons,id'],
-
-            'question_text' => ['sometimes', 'string', 'max:1000'],
-            'question_description' => ['nullable', 'string'],
-
-            'question_type' => [
-                'nullable',
-                'in:mcq,true_false,short_answer,long_answer,fill_blank'
-            ],
-
-            'difficulty' => [
-                'nullable',
-                'in:easy,medium,hard'
-            ],
-
-            'marks' => ['nullable', 'numeric', 'min:0'],
-
-            'topic' => ['nullable', 'string', 'max:255'],
-
-            'explanation' => ['nullable', 'string'],
-
-            'status' => [
-                'nullable',
-                'in:active,inactive'
-            ],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------

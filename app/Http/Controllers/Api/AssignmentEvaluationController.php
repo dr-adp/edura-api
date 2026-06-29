@@ -18,6 +18,8 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use App\Http\Requests\StoreAssignmentEvaluationRequest;
+use App\Http\Requests\UpdateAssignmentEvaluationRequest;
 
 class AssignmentEvaluationController extends BaseApiController
 {
@@ -56,23 +58,12 @@ class AssignmentEvaluationController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreAssignmentEvaluationRequest $request): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
 
-        $validated = $request->validate([
-            'assignment_submission_id' => [
-                'required',
-                'exists:assignment_submissions,id',
-                Rule::unique('assignment_evaluations', 'assignment_submission_id'),
-            ],
-            'teacher_profile_id' => ['nullable', 'exists:teacher_profiles,id'],
-            'marks_obtained' => ['required', 'numeric', 'min:0'],
-            'maximum_marks' => ['nullable', 'numeric', 'min:1'],
-            'feedback' => ['nullable', 'string'],
-            'result_status' => ['nullable', 'in:passed,failed,needs_improvement'],
-        ]);
+        $validated = $request->validated();
 
         $submission = AssignmentSubmission::with([
             'assignment.course',
@@ -135,7 +126,7 @@ class AssignmentEvaluationController extends BaseApiController
     }
 
     public function update(
-        Request $request,
+        UpdateAssignmentEvaluationRequest $request,
         AssignmentEvaluation $assignmentEvaluation
     ): JsonResponse {
         /** @var User $user */
@@ -143,19 +134,7 @@ class AssignmentEvaluationController extends BaseApiController
 
         $this->authorizeEvaluationMutation($assignmentEvaluation, $user);
 
-        $validated = $request->validate([
-            'assignment_submission_id' => [
-                'sometimes',
-                'exists:assignment_submissions,id',
-                Rule::unique('assignment_evaluations', 'assignment_submission_id')
-                    ->ignore($assignmentEvaluation->id),
-            ],
-            'teacher_profile_id' => ['nullable', 'exists:teacher_profiles,id'],
-            'marks_obtained' => ['sometimes', 'numeric', 'min:0'],
-            'maximum_marks' => ['nullable', 'numeric', 'min:1'],
-            'feedback' => ['nullable', 'string'],
-            'result_status' => ['nullable', 'in:passed,failed,needs_improvement'],
-        ]);
+        $validated = $request->validated();
 
         $originalSubmission = $assignmentEvaluation->assignmentSubmission;
         $targetSubmissionId = $validated['assignment_submission_id']

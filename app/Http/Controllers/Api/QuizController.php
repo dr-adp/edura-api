@@ -12,6 +12,8 @@ use App\Models\Lesson;
 use App\Models\InstitutionUser;
 use App\Models\CourseSection;
 use Illuminate\Support\Facades\Auth;
+use App\Http\Requests\StoreQuizRequest;
+use App\Http\Requests\UpdateQuizRequest;
 
 class QuizController extends BaseApiController
 {
@@ -109,32 +111,12 @@ class QuizController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreQuizRequest $request): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
 
-        $validated = $request->validate([
-            'course_id' => ['required', 'exists:courses,id'],
-            'course_section_id' => ['nullable', 'exists:course_sections,id'],
-            'lesson_id' => ['nullable', 'exists:lessons,id'],
-            'teacher_profile_id' => ['nullable', 'exists:teacher_profiles,id'],
-
-            'title' => ['required', 'string', 'max:255'],
-            'description' => ['nullable', 'string'],
-
-            'duration_minutes' => ['nullable', 'integer', 'min:1'],
-            'total_marks' => ['nullable', 'numeric', 'min:0'],
-            'passing_marks' => ['nullable', 'numeric', 'min:0'],
-
-            'shuffle_questions' => ['boolean'],
-            'show_result_immediately' => ['boolean'],
-
-            'available_from' => ['nullable', 'date'],
-            'available_until' => ['nullable', 'date', 'after:available_from'],
-
-            'status' => ['nullable', 'in:draft,published,closed'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -235,7 +217,7 @@ class QuizController extends BaseApiController
         );
     }
 
-    public function update(Request $request, Quiz $quiz): JsonResponse
+    public function update(UpdateQuizRequest $request, Quiz $quiz): JsonResponse
     {
         /*
     |--------------------------------------------------------------------------
@@ -249,27 +231,7 @@ class QuizController extends BaseApiController
         /** @var User $user */
         $user = Auth::user();
 
-        $validated = $request->validate([
-            'course_id' => ['sometimes', 'exists:courses,id'],
-            'course_section_id' => ['nullable', 'exists:course_sections,id'],
-            'lesson_id' => ['nullable', 'exists:lessons,id'],
-            'teacher_profile_id' => ['nullable', 'exists:teacher_profiles,id'],
-
-            'title' => ['sometimes', 'string', 'max:255'],
-            'description' => ['nullable', 'string'],
-
-            'duration_minutes' => ['nullable', 'integer', 'min:1'],
-            'total_marks' => ['nullable', 'numeric', 'min:0'],
-            'passing_marks' => ['nullable', 'numeric', 'min:0'],
-
-            'shuffle_questions' => ['boolean'],
-            'show_result_immediately' => ['boolean'],
-
-            'available_from' => ['nullable', 'date'],
-            'available_until' => ['nullable', 'date', 'after:available_from'],
-
-            'status' => ['nullable', 'in:draft,published,closed'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------

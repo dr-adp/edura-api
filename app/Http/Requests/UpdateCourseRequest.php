@@ -4,7 +4,7 @@ namespace App\Http\Requests;
 
 use Illuminate\Foundation\Http\FormRequest;
 
-class StoreCourseRequest extends FormRequest
+class UpdateCourseRequest extends FormRequest
 {
     public function authorize(): bool
     {
@@ -19,7 +19,7 @@ class StoreCourseRequest extends FormRequest
             'batch_id' => ['nullable', 'exists:batches,id'],
             'teacher_profile_id' => ['nullable', 'exists:teacher_profiles,id'],
 
-            'title' => ['required', 'string', 'max:255'],
+            'title' => ['sometimes', 'required', 'string', 'max:255'],
 
             'short_description' => ['nullable', 'string'],
             'description' => ['nullable', 'string'],

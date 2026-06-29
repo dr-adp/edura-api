@@ -10,6 +10,8 @@ use App\Http\Controllers\Api\BaseApiController;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
 use App\Models\InstitutionUser;
+use App\Http\Requests\StoreCourseRequest;
+use App\Http\Requests\UpdateCourseRequest;
 
 class CourseController extends BaseApiController
 {
@@ -95,35 +97,12 @@ class CourseController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreCourseRequest $request): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
 
-        $validated = $request->validate([
-            'institution_id' => ['nullable', 'exists:institutions,id'],
-            'department_id' => ['nullable', 'exists:departments,id'],
-            'batch_id' => ['nullable', 'exists:batches,id'],
-            'teacher_profile_id' => ['nullable', 'exists:teacher_profiles,id'],
-
-            'title' => ['required', 'string', 'max:255'],
-
-            'short_description' => ['nullable', 'string'],
-            'description' => ['nullable', 'string'],
-
-            'price' => ['nullable', 'numeric', 'min:0'],
-
-            'course_type' => ['nullable', 'in:free,paid,private'],
-            'level' => ['nullable', 'in:beginner,intermediate,advanced'],
-
-            'language' => ['nullable', 'string', 'max:100'],
-            'duration_hours' => ['nullable', 'integer', 'min:1'],
-
-            'certificate_enabled' => ['boolean'],
-            'live_class_enabled' => ['boolean'],
-
-            'status' => ['nullable', 'in:draft,published,archived'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -225,7 +204,7 @@ class CourseController extends BaseApiController
         );
     }
 
-    public function update(Request $request, Course $course): JsonResponse
+    public function update(UpdateCourseRequest $request, Course $course): JsonResponse
     {
         /*
     |--------------------------------------------------------------------------
@@ -239,30 +218,7 @@ class CourseController extends BaseApiController
         /** @var User $user */
         $user = Auth::user();
 
-        $validated = $request->validate([
-            'institution_id' => ['nullable', 'exists:institutions,id'],
-            'department_id' => ['nullable', 'exists:departments,id'],
-            'batch_id' => ['nullable', 'exists:batches,id'],
-            'teacher_profile_id' => ['nullable', 'exists:teacher_profiles,id'],
-
-            'title' => ['sometimes', 'required', 'string', 'max:255'],
-
-            'short_description' => ['nullable', 'string'],
-            'description' => ['nullable', 'string'],
-
-            'price' => ['nullable', 'numeric', 'min:0'],
-
-            'course_type' => ['nullable', 'in:free,paid,private'],
-            'level' => ['nullable', 'in:beginner,intermediate,advanced'],
-
-            'language' => ['nullable', 'string', 'max:100'],
-            'duration_hours' => ['nullable', 'integer', 'min:1'],
-
-            'certificate_enabled' => ['boolean'],
-            'live_class_enabled' => ['boolean'],
-
-            'status' => ['nullable', 'in:draft,published,archived'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------

@@ -15,6 +15,8 @@ use App\Models\StudentProfile;
 use App\Models\TeacherProfile;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
+use App\Http\Requests\StoreCourseEnrollmentRequest;
+use App\Http\Requests\UpdateCourseEnrollmentRequest;
 
 class CourseEnrollmentController extends BaseApiController
 {
@@ -121,25 +123,9 @@ class CourseEnrollmentController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreCourseEnrollmentRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'course_id' => ['required', 'exists:courses,id'],
-
-            'student_profile_id' => [
-                'required',
-                'exists:student_profiles,id',
-                Rule::unique('course_enrollments', 'student_profile_id')
-                    ->where('course_id', $request->course_id),
-            ],
-
-            'enrollment_date' => ['nullable', 'date'],
-            'payment_status' => ['nullable', 'in:free,pending,paid,failed,refunded'],
-            'amount_paid' => ['nullable', 'numeric', 'min:0'],
-            'progress_percentage' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'status' => ['nullable', 'in:active,completed,cancelled,expired'],
-            'completed_at' => ['nullable', 'date'],
-        ]);
+        $validated = $request->validated();
 
         $validated['enrollment_date'] =
             $validated['enrollment_date']
@@ -194,7 +180,7 @@ class CourseEnrollmentController extends BaseApiController
     }
 
     public function update(
-        Request $request,
+        UpdateCourseEnrollmentRequest $request,
         CourseEnrollment $courseEnrollment
     ): JsonResponse {
 
@@ -215,62 +201,7 @@ class CourseEnrollmentController extends BaseApiController
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'course_id' => [
-                'sometimes',
-                'exists:courses,id'
-            ],
-
-            'student_profile_id' => [
-                'sometimes',
-                'exists:student_profiles,id',
-                Rule::unique(
-                    'course_enrollments',
-                    'student_profile_id'
-                )
-                    ->where(
-                        'course_id',
-                        $request->course_id
-                            ?? $courseEnrollment->course_id
-                    )
-                    ->ignore(
-                        $courseEnrollment->id
-                    ),
-            ],
-
-            'enrollment_date' => [
-                'nullable',
-                'date'
-            ],
-
-            'payment_status' => [
-                'nullable',
-                'in:free,pending,paid,failed,refunded'
-            ],
-
-            'amount_paid' => [
-                'nullable',
-                'numeric',
-                'min:0'
-            ],
-
-            'progress_percentage' => [
-                'nullable',
-                'numeric',
-                'min:0',
-                'max:100'
-            ],
-
-            'status' => [
-                'nullable',
-                'in:active,completed,cancelled,expired'
-            ],
-
-            'completed_at' => [
-                'nullable',
-                'date'
-            ],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------

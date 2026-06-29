@@ -13,6 +13,8 @@ use App\Models\StudentProfile;
 use App\Models\TeacherProfile;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
+use App\Http\Requests\StoreLiveClassAttendanceRequest;
+use App\Http\Requests\UpdateLiveClassAttendanceRequest;
 
 class LiveClassAttendanceController extends BaseApiController
 {
@@ -148,46 +150,14 @@ class LiveClassAttendanceController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreLiveClassAttendanceRequest $request): JsonResponse
     {
         /*
     |--------------------------------------------------------------------------
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'live_class_id' => [
-                'required',
-                'exists:live_classes,id',
-            ],
-
-            'student_profile_id' => [
-                'required',
-                'exists:student_profiles,id',
-                Rule::unique(
-                    'live_class_attendances'
-                )->where(function ($query) use ($request) {
-
-                    return $query->where(
-                        'live_class_id',
-                        $request->live_class_id
-                    )->where(
-                        'student_profile_id',
-                        $request->student_profile_id
-                    );
-                }),
-            ],
-
-            'attendance_status' => [
-                'required',
-                'in:present,absent,late'
-            ],
-
-            'remarks' => [
-                'nullable',
-                'string',
-            ],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -274,7 +244,7 @@ class LiveClassAttendanceController extends BaseApiController
     }
 
     public function update(
-        Request $request,
+        UpdateLiveClassAttendanceRequest $request,
         LiveClassAttendance $liveClassAttendance
     ): JsonResponse {
 
@@ -292,17 +262,7 @@ class LiveClassAttendanceController extends BaseApiController
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'attendance_status' => [
-                'sometimes',
-                'in:present,absent,late',
-            ],
-
-            'remarks' => [
-                'nullable',
-                'string',
-            ],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -329,9 +289,8 @@ class LiveClassAttendanceController extends BaseApiController
     | Update Attendance
     |--------------------------------------------------------------------------
     */
-        $liveClassAttendance->update(
-            $validated
-        );
+        $liveClassAttendance->fill($validated);
+        $liveClassAttendance->save();
 
         return $this->successResponse(
             $liveClassAttendance

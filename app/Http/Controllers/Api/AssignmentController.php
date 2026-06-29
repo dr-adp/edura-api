@@ -10,6 +10,8 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
+use App\Http\Requests\StoreAssignmentRequest;
+use App\Http\Requests\UpdateAssignmentRequest;
 
 class AssignmentController extends BaseApiController
 {
@@ -50,25 +52,12 @@ class AssignmentController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreAssignmentRequest $request): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
 
-        $validated = $request->validate([
-            'course_id' => ['required', 'exists:courses,id'],
-            'course_section_id' => ['nullable', 'exists:course_sections,id'],
-            'lesson_id' => ['nullable', 'exists:lessons,id'],
-            'teacher_profile_id' => ['nullable', 'exists:teacher_profiles,id'],
-            'title' => ['required', 'string', 'max:255'],
-            'short_description' => ['nullable', 'string'],
-            'instructions' => ['nullable', 'string'],
-            'maximum_marks' => ['nullable', 'numeric', 'min:0'],
-            'available_from' => ['nullable', 'date'],
-            'due_date' => ['nullable', 'date'],
-            'allow_late_submission' => ['boolean'],
-            'status' => ['nullable', 'in:draft,published,closed'],
-        ]);
+        $validated = $request->validated();
 
         $course = Course::findOrFail(
             $validated['course_id']
@@ -152,7 +141,7 @@ class AssignmentController extends BaseApiController
     }
 
     public function update(
-        Request $request,
+        UpdateAssignmentRequest $request,
         Assignment $assignment
     ): JsonResponse {
 
@@ -175,21 +164,10 @@ class AssignmentController extends BaseApiController
             }
         }
 
-        $validated = $request->validate([
-            'course_id' => ['sometimes', 'exists:courses,id'],
-            'course_section_id' => ['nullable', 'exists:course_sections,id'],
-            'lesson_id' => ['nullable', 'exists:lessons,id'],
-            'title' => ['sometimes', 'string', 'max:255'],
-            'short_description' => ['nullable', 'string'],
-            'instructions' => ['nullable', 'string'],
-            'maximum_marks' => ['nullable', 'numeric', 'min:0'],
-            'available_from' => ['nullable', 'date'],
-            'due_date' => ['nullable', 'date'],
-            'allow_late_submission' => ['boolean'],
-            'status' => ['nullable', 'in:draft,published,closed'],
-        ]);
+        $validated = $request->validated();
 
-        $assignment->update($validated);
+        $assignment->fill($validated);
+        $assignment->save();
 
         return $this->successResponse(
             $assignment->fresh()->load([

@@ -12,6 +12,8 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
 use App\Models\InstitutionUser;
+use App\Http\Requests\StoreAssignmentSubmissionRequest;
+use App\Http\Requests\UpdateAssignmentSubmissionRequest;
 
 class AssignmentSubmissionController extends BaseApiController
 {
@@ -162,7 +164,7 @@ class AssignmentSubmissionController extends BaseApiController
         );
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreAssignmentSubmissionRequest $request): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
@@ -183,24 +185,7 @@ class AssignmentSubmissionController extends BaseApiController
                 'Unauthorized role.'
             );
         }
-        $validated = $request->validate([
-            'assignment_id' => ['required', 'exists:assignments,id'],
-            'student_profile_id' => [
-                'required',
-                'exists:student_profiles,id',
-                Rule::unique('assignment_submissions', 'student_profile_id')
-                    ->where('assignment_id', $request->assignment_id),
-            ],
-            'submission_text' => ['nullable', 'string'],
-            'external_url' => ['nullable', 'string', 'max:1000'],
-            'file' => [
-                'nullable',
-                'file',
-                'mimes:pdf,doc,docx,ppt,pptx,jpg,jpeg,png,webp,zip,rar,txt,mp4,mov,avi,mkv,webm',
-                'max:512000'
-            ],
-            'status' => ['nullable', 'in:draft,submitted,reviewed,returned'],
-        ]);
+        $validated = $request->validated();
 
         /*
 |--------------------------------------------------------------------------
@@ -477,7 +462,7 @@ class AssignmentSubmissionController extends BaseApiController
     }
 
     public function update(
-        Request $request,
+        UpdateAssignmentSubmissionRequest $request,
         AssignmentSubmission $assignmentSubmission
     ): JsonResponse {
 
@@ -563,20 +548,7 @@ class AssignmentSubmissionController extends BaseApiController
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'submission_text' => ['nullable', 'string'],
-            'external_url' => ['nullable', 'string', 'max:1000'],
-            'file' => [
-                'nullable',
-                'file',
-                'mimes:pdf,doc,docx,ppt,pptx,jpg,jpeg,png,webp,zip,rar,txt,mp4,mov,avi,mkv,webm',
-                'max:512000'
-            ],
-            'status' => [
-                'nullable',
-                'in:draft,submitted,reviewed,returned'
-            ],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -623,9 +595,8 @@ class AssignmentSubmissionController extends BaseApiController
                 );
         }
 
-        $assignmentSubmission->update(
-            $validated
-        );
+        $assignmentSubmission->fill($validated);
+        $assignmentSubmission->save();
 
         return $this->successResponse(
             $assignmentSubmission

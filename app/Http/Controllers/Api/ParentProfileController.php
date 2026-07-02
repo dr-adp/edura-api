@@ -5,8 +5,9 @@ namespace App\Http\Controllers\Api;
 use App\Models\ParentProfile;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Validation\Rule;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreParentProfileRequest;
+use App\Http\Requests\UpdateParentProfileRequest;
 
 class ParentProfileController extends Controller
 {
@@ -26,28 +27,9 @@ class ParentProfileController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreParentProfileRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['required', 'exists:institutions,id'],
-
-            'user_id' => [
-                'required',
-                'exists:users,id',
-            ],
-
-            'student_profile_id' => [
-                'required',
-                'exists:student_profiles,id',
-            ],
-
-            'relationship' => ['nullable', 'string', 'max:100'],
-            'occupation' => ['nullable', 'string', 'max:255'],
-            'phone' => ['nullable', 'string', 'max:30'],
-            'alternate_phone' => ['nullable', 'string', 'max:30'],
-            'address' => ['nullable', 'string'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         $parent = ParentProfile::create($validated);
 
@@ -73,19 +55,9 @@ class ParentProfileController extends Controller
         ]);
     }
 
-    public function update(Request $request, ParentProfile $parentProfile): JsonResponse
+    public function update(UpdateParentProfileRequest $request, ParentProfile $parentProfile): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['sometimes', 'required', 'exists:institutions,id'],
-            'user_id' => ['sometimes', 'required', 'exists:users,id'],
-            'student_profile_id' => ['sometimes', 'required', 'exists:student_profiles,id'],
-            'relationship' => ['nullable', 'string', 'max:100'],
-            'occupation' => ['nullable', 'string', 'max:255'],
-            'phone' => ['nullable', 'string', 'max:30'],
-            'alternate_phone' => ['nullable', 'string', 'max:30'],
-            'address' => ['nullable', 'string'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         $parentProfile->update($validated);
 

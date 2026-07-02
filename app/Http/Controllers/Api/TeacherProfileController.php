@@ -7,6 +7,8 @@ use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\Rule;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreTeacherProfileRequest;
+use App\Http\Requests\UpdateTeacherProfileRequest;
 
 class TeacherProfileController extends Controller
 {
@@ -22,25 +24,9 @@ class TeacherProfileController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreTeacherProfileRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['required', 'exists:institutions,id'],
-            'user_id' => [
-                'required',
-                'exists:users,id',
-                Rule::unique('teacher_profiles', 'user_id')
-                    ->where('institution_id', $request->institution_id),
-            ],
-            'department_id' => ['nullable', 'exists:departments,id'],
-            'employee_code' => ['nullable', 'string', 'max:100'],
-            'qualification' => ['nullable', 'string', 'max:255'],
-            'specialization' => ['nullable', 'string', 'max:255'],
-            'bio' => ['nullable', 'string'],
-            'experience_years' => ['nullable', 'string', 'max:50'],
-            'phone' => ['nullable', 'string', 'max:30'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         $teacher = TeacherProfile::create($validated);
 
@@ -58,27 +44,9 @@ class TeacherProfileController extends Controller
         ]);
     }
 
-    public function update(Request $request, TeacherProfile $teacherProfile): JsonResponse
+    public function update(UpdateTeacherProfileRequest $request, TeacherProfile $teacherProfile): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['sometimes', 'required', 'exists:institutions,id'],
-            'user_id' => [
-                'sometimes',
-                'required',
-                'exists:users,id',
-                Rule::unique('teacher_profiles', 'user_id')
-                    ->where('institution_id', $request->institution_id ?? $teacherProfile->institution_id)
-                    ->ignore($teacherProfile->id),
-            ],
-            'department_id' => ['nullable', 'exists:departments,id'],
-            'employee_code' => ['nullable', 'string', 'max:100'],
-            'qualification' => ['nullable', 'string', 'max:255'],
-            'specialization' => ['nullable', 'string', 'max:255'],
-            'bio' => ['nullable', 'string'],
-            'experience_years' => ['nullable', 'string', 'max:50'],
-            'phone' => ['nullable', 'string', 'max:30'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         $teacherProfile->update($validated);
 

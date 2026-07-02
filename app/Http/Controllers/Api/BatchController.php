@@ -7,6 +7,8 @@ use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\Rule;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreBatchRequest;
+use App\Http\Requests\UpdateBatchRequest;
 
 class BatchController extends Controller
 {
@@ -22,25 +24,9 @@ class BatchController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreBatchRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['required', 'exists:institutions,id'],
-            'department_id' => ['nullable', 'exists:departments,id'],
-            'name' => ['required', 'string', 'max:255'],
-            'code' => [
-                'required',
-                'string',
-                'max:50',
-                Rule::unique('batches', 'code')
-                    ->where('institution_id', $request->institution_id),
-            ],
-            'start_date' => ['nullable', 'date'],
-            'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
-            'mode' => ['nullable', 'in:offline,online,hybrid'],
-            'status' => ['nullable', 'in:active,inactive,completed'],
-            'description' => ['nullable', 'string'],
-        ]);
+        $validated = $request->validated();
 
         $batch = Batch::create($validated);
 
@@ -58,27 +44,9 @@ class BatchController extends Controller
         ]);
     }
 
-    public function update(Request $request, Batch $batch): JsonResponse
+    public function update(UpdateBatchRequest $request, Batch $batch): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['sometimes', 'required', 'exists:institutions,id'],
-            'department_id' => ['nullable', 'exists:departments,id'],
-            'name' => ['sometimes', 'required', 'string', 'max:255'],
-            'code' => [
-                'sometimes',
-                'required',
-                'string',
-                'max:50',
-                Rule::unique('batches', 'code')
-                    ->where('institution_id', $request->institution_id ?? $batch->institution_id)
-                    ->ignore($batch->id),
-            ],
-            'start_date' => ['nullable', 'date'],
-            'end_date' => ['nullable', 'date', 'after_or_equal:start_date'],
-            'mode' => ['nullable', 'in:offline,online,hybrid'],
-            'status' => ['nullable', 'in:active,inactive,completed'],
-            'description' => ['nullable', 'string'],
-        ]);
+        $validated = $request->validated();
 
         $batch->update($validated);
 

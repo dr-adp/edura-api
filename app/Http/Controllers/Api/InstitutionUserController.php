@@ -7,6 +7,8 @@ use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\Rule;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreInstitutionUserRequest;
+use App\Http\Requests\UpdateInstitutionUserRequest;
 
 class InstitutionUserController extends Controller
 {
@@ -22,19 +24,9 @@ class InstitutionUserController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreInstitutionUserRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['required', 'exists:institutions,id'],
-            'user_id' => [
-                'required',
-                'exists:users,id',
-                Rule::unique('institution_users', 'user_id')
-                    ->where('institution_id', $request->institution_id),
-            ],
-            'role_in_institution' => ['required', 'in:owner,admin,teacher,student,parent'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         $institutionUser = InstitutionUser::create($validated);
 
@@ -52,21 +44,9 @@ class InstitutionUserController extends Controller
         ]);
     }
 
-    public function update(Request $request, InstitutionUser $institutionUser): JsonResponse
+    public function update(UpdateInstitutionUserRequest $request, InstitutionUser $institutionUser): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['sometimes', 'required', 'exists:institutions,id'],
-            'user_id' => [
-                'sometimes',
-                'required',
-                'exists:users,id',
-                Rule::unique('institution_users', 'user_id')
-                    ->where('institution_id', $request->institution_id ?? $institutionUser->institution_id)
-                    ->ignore($institutionUser->id),
-            ],
-            'role_in_institution' => ['sometimes', 'required', 'in:owner,admin,teacher,student,parent'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         $institutionUser->update($validated);
 

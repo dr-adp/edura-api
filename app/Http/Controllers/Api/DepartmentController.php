@@ -7,6 +7,8 @@ use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\Rule;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\StoreDepartmentRequest;
+use App\Http\Requests\UpdateDepartmentRequest;
 
 class DepartmentController extends Controller
 {
@@ -22,21 +24,9 @@ class DepartmentController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreDepartmentRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['required', 'exists:institutions,id'],
-            'name' => ['required', 'string', 'max:255'],
-            'code' => [
-                'required',
-                'string',
-                'max:50',
-                Rule::unique('departments', 'code')
-                    ->where('institution_id', $request->institution_id),
-            ],
-            'description' => ['nullable', 'string'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         $department = Department::create($validated);
 
@@ -54,23 +44,9 @@ class DepartmentController extends Controller
         ]);
     }
 
-    public function update(Request $request, Department $department): JsonResponse
+    public function update(UpdateDepartmentRequest $request, Department $department): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['sometimes', 'required', 'exists:institutions,id'],
-            'name' => ['sometimes', 'required', 'string', 'max:255'],
-            'code' => [
-                'sometimes',
-                'required',
-                'string',
-                'max:50',
-                Rule::unique('departments', 'code')
-                    ->where('institution_id', $request->institution_id ?? $department->institution_id)
-                    ->ignore($department->id),
-            ],
-            'description' => ['nullable', 'string'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         $department->update($validated);
 

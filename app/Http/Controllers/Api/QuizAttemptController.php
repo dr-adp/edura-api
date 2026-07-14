@@ -13,6 +13,8 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
 use App\Models\CourseEnrollment;
+use App\Http\Requests\StoreQuizAttemptRequest;
+use App\Http\Requests\UpdateQuizAttemptRequest;
 
 class QuizAttemptController extends Controller
 {
@@ -166,12 +168,9 @@ class QuizAttemptController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreQuizAttemptRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'quiz_id' => ['required', 'exists:quizzes,id'],
-            'student_profile_id' => ['required', 'exists:student_profiles,id'],
-        ]);
+        $validated = $request->validated();
 
         /** @var User $user */
         $user = Auth::user();
@@ -442,7 +441,7 @@ class QuizAttemptController extends Controller
     }
 
     public function update(
-        Request $request,
+        UpdateQuizAttemptRequest $request,
         QuizAttempt $quizAttempt
     ): JsonResponse {
 
@@ -485,12 +484,7 @@ class QuizAttemptController extends Controller
     | Validation
     |--------------------------------------------------------------------------
     */
-        $validated = $request->validate([
-            'status' => [
-                'required',
-                'in:in_progress,submitted',
-            ],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------

@@ -18,6 +18,8 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use App\Http\Requests\StoreLessonProgressRequest;
+use App\Http\Requests\UpdateLessonProgressRequest;
 
 class LessonProgressController extends Controller
 {
@@ -52,23 +54,12 @@ class LessonProgressController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreLessonProgressRequest $request): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
 
-        $validated = $request->validate([
-            'course_enrollment_id' => ['required', 'exists:course_enrollments,id'],
-            'lesson_id' => [
-                'required',
-                'exists:lessons,id',
-                Rule::unique('lesson_progress', 'lesson_id')
-                    ->where('course_enrollment_id', $request->course_enrollment_id),
-            ],
-            'status' => ['nullable', 'in:not_started,in_progress,completed'],
-            'progress_percentage' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'watch_time_minutes' => ['nullable', 'integer', 'min:0'],
-        ]);
+        $validated = $request->validated();
 
         $courseEnrollment = CourseEnrollment::with([
             'course',
@@ -120,30 +111,14 @@ class LessonProgressController extends Controller
         ]);
     }
 
-    public function update(Request $request, LessonProgress $lessonProgress): JsonResponse
+    public function update(UpdateLessonProgressRequest $request, LessonProgress $lessonProgress): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
 
         $this->authorizeLessonProgressMutation($lessonProgress, $user);
 
-        $validated = $request->validate([
-            'course_enrollment_id' => ['sometimes', 'exists:course_enrollments,id'],
-            'lesson_id' => [
-                'sometimes',
-                'exists:lessons,id',
-                Rule::unique('lesson_progress', 'lesson_id')
-                    ->where(
-                        'course_enrollment_id',
-                        $request->course_enrollment_id
-                            ?? $lessonProgress->course_enrollment_id
-                    )
-                    ->ignore($lessonProgress->id),
-            ],
-            'status' => ['nullable', 'in:not_started,in_progress,completed'],
-            'progress_percentage' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'watch_time_minutes' => ['nullable', 'integer', 'min:0'],
-        ]);
+        $validated = $request->validated();
 
         $originalEnrollment = $lessonProgress->courseEnrollment;
         $targetEnrollmentId = $validated['course_enrollment_id']

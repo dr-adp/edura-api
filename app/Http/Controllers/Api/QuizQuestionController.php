@@ -13,6 +13,8 @@ use App\Models\Course;
 use App\Models\QuestionBank;
 use App\Models\InstitutionUser;
 use Illuminate\Support\Facades\Auth;
+use App\Http\Requests\StoreQuizQuestionRequest;
+use App\Http\Requests\UpdateQuizQuestionRequest;
 
 class QuizQuestionController extends Controller
 {
@@ -108,19 +110,9 @@ class QuizQuestionController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreQuizQuestionRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'quiz_id' => ['required', 'exists:quizzes,id'],
-            'question_bank_id' => [
-                'required',
-                'exists:question_banks,id',
-                Rule::unique('quiz_questions', 'question_bank_id')
-                    ->where('quiz_id', $request->quiz_id),
-            ],
-            'marks' => ['nullable', 'numeric', 'min:0'],
-            'sort_order' => ['nullable', 'integer'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -197,7 +189,7 @@ class QuizQuestionController extends Controller
         ]);
     }
 
-    public function update(Request $request, QuizQuestion $quizQuestion): JsonResponse
+    public function update(UpdateQuizQuestionRequest $request, QuizQuestion $quizQuestion): JsonResponse
     {
         /*
     |--------------------------------------------------------------------------
@@ -208,21 +200,7 @@ class QuizQuestionController extends Controller
             quizQuestion: $quizQuestion
         );
 
-        $validated = $request->validate([
-            'quiz_id' => ['sometimes', 'exists:quizzes,id'],
-            'question_bank_id' => [
-                'sometimes',
-                'exists:question_banks,id',
-                Rule::unique('quiz_questions', 'question_bank_id')
-                    ->where(
-                        'quiz_id',
-                        $request->quiz_id ?? $quizQuestion->quiz_id
-                    )
-                    ->ignore($quizQuestion->id),
-            ],
-            'marks' => ['nullable', 'numeric', 'min:0'],
-            'sort_order' => ['nullable', 'integer'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------

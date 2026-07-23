@@ -18,6 +18,9 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\ValidationException;
+use App\Http\Requests\StoreGradebookRequest;
+use App\Http\Requests\UpdateGradebookRequest;
+use App\Http\Requests\RecalculateGradebookRequest;
 
 class GradebookController extends Controller
 {
@@ -52,12 +55,9 @@ class GradebookController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreGradebookRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'course_id' => ['required', 'exists:courses,id'],
-            'student_profile_id' => ['required', 'exists:student_profiles,id'],
-        ]);
+        $validated = $request->validated();
 
         // AUTHORIZATION: Verify course, student, and enrollment access
         $this->authorizeCourseStudentAccess(
@@ -87,7 +87,7 @@ class GradebookController extends Controller
         ]);
     }
 
-    public function update(Request $request, Gradebook $gradebook): JsonResponse
+    public function update(UpdateGradebookRequest $request, Gradebook $gradebook): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
@@ -95,11 +95,7 @@ class GradebookController extends Controller
         // AUTHORIZATION: Only authorized staff can update gradebooks
         $this->authorizeGradebookManagement($gradebook, $user);
 
-        $validated = $request->validate([
-            'assignment_marks' => ['nullable', 'numeric', 'min:0'],
-            'quiz_marks' => ['nullable', 'numeric', 'min:0'],
-            'maximum_marks' => ['nullable', 'numeric', 'min:0'],
-        ]);
+        $validated = $request->validated();
 
         /*
         |--------------------------------------------------------------------------
@@ -168,12 +164,9 @@ class GradebookController extends Controller
         ]);
     }
 
-    public function recalculate(Request $request): JsonResponse
+    public function recalculate(RecalculateGradebookRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'course_id' => ['required', 'exists:courses,id'],
-            'student_profile_id' => ['required', 'exists:student_profiles,id'],
-        ]);
+        $validated = $request->validated();
 
         // AUTHORIZATION: Verify course, student, and enrollment access
         $this->authorizeCourseStudentAccess(

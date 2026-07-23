@@ -17,6 +17,8 @@ use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use App\Http\Requests\StoreQuizAnswerRequest;
+use App\Http\Requests\UpdateQuizAnswerRequest;
 
 class QuizAnswerController extends Controller
 {
@@ -60,7 +62,7 @@ class QuizAnswerController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreQuizAnswerRequest $request): JsonResponse
     {
         /** @var User $user */
         $user = Auth::user();
@@ -70,31 +72,7 @@ class QuizAnswerController extends Controller
         | Validation
         |--------------------------------------------------------------------------
         */
-        $validated = $request->validate([
-            'quiz_attempt_id' => [
-                'required',
-                'exists:quiz_attempts,id',
-            ],
-            'question_bank_id' => [
-                'required',
-                'exists:question_banks,id',
-                Rule::unique(
-                    'quiz_answers',
-                    'question_bank_id'
-                )->where(
-                    'quiz_attempt_id',
-                    $request->quiz_attempt_id
-                ),
-            ],
-            'question_option_id' => [
-                'nullable',
-                'exists:question_options,id',
-            ],
-            'answer_text' => [
-                'nullable',
-                'string',
-            ],
-        ]);
+        $validated = $request->validated();
 
         $attempt = QuizAttempt::with([
             'quiz.course',
@@ -211,7 +189,7 @@ class QuizAnswerController extends Controller
     }
 
     public function update(
-        Request $request,
+        UpdateQuizAnswerRequest $request,
         QuizAnswer $quizAnswer
     ): JsonResponse {
 
@@ -237,24 +215,7 @@ class QuizAnswerController extends Controller
         | Validation
         |--------------------------------------------------------------------------
         */
-        $validated = $request->validate([
-            'question_option_id' => [
-                'nullable',
-                'exists:question_options,id',
-            ],
-            'answer_text' => [
-                'nullable',
-                'string',
-            ],
-            'marks_obtained' => [
-                'nullable',
-                'numeric',
-                'min:0',
-            ],
-            'is_correct' => [
-                'boolean',
-            ],
-        ]);
+        $validated = $request->validated();
 
         $attempt = $quizAnswer->quizAttempt;
         $quizQuestion = $this->resolveQuizQuestion(

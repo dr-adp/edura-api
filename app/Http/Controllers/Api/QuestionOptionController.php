@@ -3,7 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Models\QuestionOption;
-use Illuminate\Http\Request;
+
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Controller;
 use App\Models\User;
@@ -11,6 +11,8 @@ use App\Models\Course;
 use App\Models\QuestionBank;
 use App\Models\InstitutionUser;
 use Illuminate\Support\Facades\Auth;
+use App\Http\Requests\StoreQuestionOptionRequest;
+use App\Http\Requests\UpdateQuestionOptionRequest;
 
 class QuestionOptionController extends Controller
 {
@@ -105,14 +107,9 @@ class QuestionOptionController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreQuestionOptionRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'question_bank_id' => ['required', 'exists:question_banks,id'],
-            'option_text' => ['required', 'string', 'max:1000'],
-            'is_correct' => ['boolean'],
-            'sort_order' => ['nullable', 'integer'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------
@@ -155,7 +152,7 @@ class QuestionOptionController extends Controller
         ]);
     }
 
-    public function update(Request $request, QuestionOption $questionOption): JsonResponse
+    public function update(UpdateQuestionOptionRequest $request, QuestionOption $questionOption): JsonResponse
     {
         /*
     |--------------------------------------------------------------------------
@@ -166,12 +163,7 @@ class QuestionOptionController extends Controller
             questionOption: $questionOption
         );
 
-        $validated = $request->validate([
-            'question_bank_id' => ['sometimes', 'exists:question_banks,id'],
-            'option_text' => ['sometimes', 'string', 'max:1000'],
-            'is_correct' => ['boolean'],
-            'sort_order' => ['nullable', 'integer'],
-        ]);
+        $validated = $request->validated();
 
         /*
     |--------------------------------------------------------------------------

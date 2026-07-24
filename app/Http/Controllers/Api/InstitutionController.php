@@ -3,7 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Models\Institution;
-use Illuminate\Http\Request;
+use App\Services\InstitutionService;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreInstitutionRequest;
@@ -11,9 +11,15 @@ use App\Http\Requests\UpdateInstitutionRequest;
 
 class InstitutionController extends Controller
 {
+    private InstitutionService $institutionService;
+
+    public function __construct(InstitutionService $institutionService)
+    {
+        $this->institutionService = $institutionService;
+    }
     public function index(): JsonResponse
     {
-        $institutions = Institution::latest()->paginate(10);
+        $institutions = $this->institutionService->getAll();
 
         return response()->json([
             'message' => 'Institutions fetched successfully.',
@@ -25,7 +31,7 @@ class InstitutionController extends Controller
     {
         $validated = $request->validated();
 
-        $institution = Institution::create($validated);
+        $institution = $this->institutionService->create($validated);
 
         return response()->json([
             'message' => 'Institution created successfully.',
@@ -45,7 +51,10 @@ class InstitutionController extends Controller
     {
         $validated = $request->validated();
 
-        $institution->update($validated);
+        $institution = $this->institutionService->update(
+            $institution,
+            $validated
+        );
 
         return response()->json([
             'message' => 'Institution updated successfully.',
@@ -55,7 +64,7 @@ class InstitutionController extends Controller
 
     public function destroy(Institution $institution): JsonResponse
     {
-        $institution->delete();
+        $this->institutionService->delete($institution);
 
         return response()->json([
             'message' => 'Institution deleted successfully.',

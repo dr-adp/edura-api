@@ -3,19 +3,23 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\AttendanceReportRequest;
+use App\Http\Requests\BulkStoreAttendanceRecordRequest;
+use App\Http\Requests\StoreAttendanceRecordRequest;
+use App\Http\Requests\UpdateAttendanceRecordRequest;
 use App\Models\AttendanceRecord;
 use App\Models\Batch;
 use App\Models\Course;
+use App\Models\InstitutionUser;
 use App\Models\StudentProfile;
+use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
-use Illuminate\Support\Facades\Auth;
-use App\Models\User;
-use App\Models\InstitutionUser;
 
 class AttendanceRecordController extends Controller
 {
@@ -36,9 +40,9 @@ class AttendanceRecordController extends Controller
         'markedBy',
     ];
 
-    public function index(Request $request): JsonResponse
+    public function index(AttendanceReportRequest $request): JsonResponse
     {
-        $validated = $this->validateFilters($request);
+        $validated = $request->validated();
 
         $records = $this->filteredQuery($validated)
             ->with(self::RELATIONS)
@@ -52,9 +56,10 @@ class AttendanceRecordController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreAttendanceRecordRequest $request): JsonResponse
     {
-        $validated = $this->validateRecord($request);
+        $validated = $request->validated();
+
         $data = $this->prepareRecordData($validated, $request);
 
         $studentProfile = StudentProfile::findOrFail(
@@ -64,7 +69,6 @@ class AttendanceRecordController extends Controller
         $course = null;
 
         if (!empty($data['course_id'])) {
-
             $course = Course::findOrFail(
                 $data['course_id']
             );
@@ -74,6 +78,7 @@ class AttendanceRecordController extends Controller
             course: $course,
             studentProfile: $studentProfile
         );
+
         $this->ensureCheckoutIsAfterCheckin($data);
 
         $this->ensureRecordIsUnique(
@@ -89,20 +94,11 @@ class AttendanceRecordController extends Controller
         ], 201);
     }
 
-    public function bulkStore(Request $request): JsonResponse
-    {
-        $validated = $request->validate([
-            'institution_id' => ['nullable', 'exists:institutions,id'],
-            'batch_id' => ['nullable', 'exists:batches,id'],
-            'course_id' => ['nullable', 'exists:courses,id'],
-            'attendance_date' => ['nullable', 'date'],
-            'records' => ['required', 'array', 'min:1'],
-            'records.*.student_profile_id' => ['required', 'exists:student_profiles,id'],
-            'records.*.attendance_status' => ['nullable', Rule::in(self::STATUSES)],
-            'records.*.check_in_at' => ['nullable', 'date'],
-            'records.*.check_out_at' => ['nullable', 'date'],
-            'records.*.remarks' => ['nullable', 'string'],
-        ]);
+    public function bulkStore(
+        BulkStoreAttendanceRecordRequest $request
+    ): JsonResponse {
+
+        $validated = $request->validated();
 
         $sharedData = array_filter([
             'institution_id' => $validated['institution_id'] ?? null,
@@ -114,13 +110,16 @@ class AttendanceRecordController extends Controller
         });
 
         $records = DB::transaction(function () use ($validated, $sharedData, $request) {
+
             $savedRecords = collect();
 
             foreach ($validated['records'] as $recordInput) {
+
                 $data = $this->prepareRecordData(
                     array_merge($sharedData, $recordInput),
                     $request
                 );
+
                 $studentProfile = StudentProfile::findOrFail(
                     $data['student_profile_id']
                 );
@@ -128,7 +127,6 @@ class AttendanceRecordController extends Controller
                 $course = null;
 
                 if (!empty($data['course_id'])) {
-
                     $course = Course::findOrFail(
                         $data['course_id']
                     );
@@ -138,9 +136,12 @@ class AttendanceRecordController extends Controller
                     course: $course,
                     studentProfile: $studentProfile
                 );
+
                 $this->ensureCheckoutIsAfterCheckin($data);
 
-                $savedRecords->push($this->updateOrCreateRecordForDate($data));
+                $savedRecords->push(
+                    $this->updateOrCreateRecordForDate($data)
+                );
             }
 
             return $savedRecords;
@@ -148,9 +149,11 @@ class AttendanceRecordController extends Controller
 
         return response()->json([
             'message' => 'Attendance records saved successfully.',
-            'data' => $records->map(function (AttendanceRecord $record) {
-                return $record->load(self::RELATIONS);
-            })->values(),
+            'data' => $records
+                ->map(function (AttendanceRecord $record) {
+                    return $record->load(self::RELATIONS);
+                })
+                ->values(),
         ], 201);
     }
 
@@ -159,22 +162,23 @@ class AttendanceRecordController extends Controller
         $this->authorizeAttendanceRecord(
             attendanceRecord: $attendanceRecord
         );
+
         return response()->json([
             'message' => 'Attendance record fetched successfully.',
             'data' => $attendanceRecord->load(self::RELATIONS),
         ]);
     }
 
-    public function update(Request $request, AttendanceRecord $attendanceRecord): JsonResponse
-    {
+    public function update(
+        UpdateAttendanceRecordRequest $request,
+        AttendanceRecord $attendanceRecord
+    ): JsonResponse {
+
         $this->authorizeAttendanceRecord(
             attendanceRecord: $attendanceRecord
         );
 
-        $validated = $this->validateRecord(
-            $request,
-            true
-        );
+        $validated = $request->validated();
 
         $data = $this->prepareRecordData(
             $validated,
@@ -182,11 +186,6 @@ class AttendanceRecordController extends Controller
             $attendanceRecord
         );
 
-        /*
-    |--------------------------------------------------------------------------
-    | Re-Authorize New Target Data
-    |--------------------------------------------------------------------------
-    */
         $studentProfile = StudentProfile::findOrFail(
             $data['student_profile_id']
         );
@@ -205,9 +204,7 @@ class AttendanceRecordController extends Controller
             studentProfile: $studentProfile
         );
 
-        $this->ensureCheckoutIsAfterCheckin(
-            $data
-        );
+        $this->ensureCheckoutIsAfterCheckin($data);
 
         $this->ensureRecordIsUnique(
             (int) $data['student_profile_id'],
@@ -215,9 +212,7 @@ class AttendanceRecordController extends Controller
             $attendanceRecord->id
         );
 
-        $attendanceRecord->update(
-            $data
-        );
+        $attendanceRecord->update($data);
 
         return response()->json([
             'message' => 'Attendance record updated successfully.',
@@ -227,11 +222,14 @@ class AttendanceRecordController extends Controller
         ]);
     }
 
-    public function destroy(AttendanceRecord $attendanceRecord): JsonResponse
-    {
+    public function destroy(
+        AttendanceRecord $attendanceRecord
+    ): JsonResponse {
+
         $this->authorizeAttendanceRecord(
             attendanceRecord: $attendanceRecord
         );
+
         $attendanceRecord->delete();
 
         return response()->json([
@@ -239,15 +237,12 @@ class AttendanceRecordController extends Controller
         ]);
     }
 
-    public function report(Request $request): JsonResponse
-    {
-        $validated = $this->validateFilters($request);
+    public function report(
+        AttendanceReportRequest $request
+    ): JsonResponse {
 
-        /*
-    |--------------------------------------------------------------------------
-    | Explicit Course Authorization
-    |--------------------------------------------------------------------------
-    */
+        $validated = $request->validated();
+
         if (!empty($validated['course_id'])) {
 
             $course = Course::findOrFail(
@@ -275,22 +270,12 @@ class AttendanceRecordController extends Controller
                 'studentProfile.user',
                 'studentProfile.batch',
             ])
-            ->whereDate(
-                'attendance_date',
-                '>=',
-                $fromDate
-            )
-            ->whereDate(
-                'attendance_date',
-                '<=',
-                $toDate
-            )
+            ->whereDate('attendance_date', '>=', $fromDate)
+            ->whereDate('attendance_date', '<=', $toDate)
             ->orderBy('attendance_date')
             ->get();
 
-        $statusCounts = $this->statusCounts(
-            $records
-        );
+        $statusCounts = $this->statusCounts($records);
 
         $effectivePresent =
             $statusCounts['present']
@@ -303,22 +288,19 @@ class AttendanceRecordController extends Controller
             ->groupBy('student_profile_id')
             ->map(function ($studentRecords) {
 
-                $counts = $this->statusCounts(
-                    $studentRecords
-                );
+                $counts = $this->statusCounts($studentRecords);
 
                 $effectiveStudentPresent =
                     $counts['present']
                     + $counts['late']
                     + ($counts['half_day'] * 0.5);
 
-                $studentTotal =
-                    $studentRecords->count();
+                $studentTotal = $studentRecords->count();
 
-                $firstRecord =
-                    $studentRecords->first();
+                $firstRecord = $studentRecords->first();
 
                 return [
+
                     'student_profile_id' =>
                     $firstRecord->student_profile_id,
 
@@ -354,7 +336,9 @@ class AttendanceRecordController extends Controller
         return response()->json([
             'message' => 'Attendance report generated successfully.',
             'data' => [
+
                 'filters' => [
+
                     'from_date' =>
                     $fromDate,
 
@@ -378,6 +362,7 @@ class AttendanceRecordController extends Controller
                 ],
 
                 'summary' => [
+
                     'total_records' =>
                     $totalRecords,
 
@@ -402,39 +387,7 @@ class AttendanceRecordController extends Controller
         ]);
     }
 
-    private function validateRecord(Request $request, bool $isUpdate = false): array
-    {
-        return $request->validate([
-            'institution_id' => ['nullable', 'exists:institutions,id'],
-            'batch_id' => ['nullable', 'exists:batches,id'],
-            'course_id' => ['nullable', 'exists:courses,id'],
-            'student_profile_id' => [
-                $isUpdate ? 'sometimes' : 'required',
-                'exists:student_profiles,id',
-            ],
-            'attendance_date' => [$isUpdate ? 'sometimes' : 'nullable', 'date'],
-            'attendance_status' => ['nullable', Rule::in(self::STATUSES)],
-            'check_in_at' => ['nullable', 'date'],
-            'check_out_at' => ['nullable', 'date', 'after_or_equal:check_in_at'],
-            'remarks' => ['nullable', 'string'],
-        ]);
-    }
-
-    private function validateFilters(Request $request): array
-    {
-        return $request->validate([
-            'institution_id' => ['nullable', 'exists:institutions,id'],
-            'batch_id' => ['nullable', 'exists:batches,id'],
-            'course_id' => ['nullable', 'exists:courses,id'],
-            'student_profile_id' => ['nullable', 'exists:student_profiles,id'],
-            'attendance_status' => ['nullable', Rule::in(self::STATUSES)],
-            'date' => ['nullable', 'date'],
-            'from_date' => ['nullable', 'date'],
-            'to_date' => ['nullable', 'date', 'after_or_equal:from_date'],
-            'per_page' => ['nullable', 'integer', 'min:1', 'max:100'],
-        ]);
-    }
-
+    
     private function filteredQuery(array $filters)
     {
         /** @var User $user */

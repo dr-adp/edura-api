@@ -5,7 +5,7 @@ namespace App\Http\Requests;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
-class StoreAttendanceRecordRequest extends FormRequest
+class BulkStoreAttendanceRecordRequest extends FormRequest
 {
     /**
      * Determine whether the user is authorized to make this request.
@@ -16,7 +16,7 @@ class StoreAttendanceRecordRequest extends FormRequest
     }
 
     /**
-     * Get the validation rules.
+     * Validation rules.
      */
     public function rules(): array
     {
@@ -37,17 +37,23 @@ class StoreAttendanceRecordRequest extends FormRequest
                 'exists:courses,id',
             ],
 
-            'student_profile_id' => [
-                'required',
-                'exists:student_profiles,id',
-            ],
-
             'attendance_date' => [
                 'nullable',
                 'date',
             ],
 
-            'attendance_status' => [
+            'records' => [
+                'required',
+                'array',
+                'min:1',
+            ],
+
+            'records.*.student_profile_id' => [
+                'required',
+                'exists:student_profiles,id',
+            ],
+
+            'records.*.attendance_status' => [
                 'nullable',
                 Rule::in([
                     'present',
@@ -58,18 +64,18 @@ class StoreAttendanceRecordRequest extends FormRequest
                 ]),
             ],
 
-            'check_in_at' => [
+            'records.*.check_in_at' => [
                 'nullable',
                 'date',
             ],
 
-            'check_out_at' => [
+            'records.*.check_out_at' => [
                 'nullable',
                 'date',
-                'after_or_equal:check_in_at',
+                'after_or_equal:records.*.check_in_at',
             ],
 
-            'remarks' => [
+            'records.*.remarks' => [
                 'nullable',
                 'string',
             ],

@@ -5,7 +5,7 @@ namespace App\Http\Requests;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
-class StoreAttendanceRecordRequest extends FormRequest
+class AttendanceReportRequest extends FormRequest
 {
     /**
      * Determine whether the user is authorized to make this request.
@@ -16,7 +16,7 @@ class StoreAttendanceRecordRequest extends FormRequest
     }
 
     /**
-     * Get the validation rules.
+     * Validation rules.
      */
     public function rules(): array
     {
@@ -38,13 +38,8 @@ class StoreAttendanceRecordRequest extends FormRequest
             ],
 
             'student_profile_id' => [
-                'required',
-                'exists:student_profiles,id',
-            ],
-
-            'attendance_date' => [
                 'nullable',
-                'date',
+                'exists:student_profiles,id',
             ],
 
             'attendance_status' => [
@@ -58,20 +53,27 @@ class StoreAttendanceRecordRequest extends FormRequest
                 ]),
             ],
 
-            'check_in_at' => [
+            'date' => [
                 'nullable',
                 'date',
             ],
 
-            'check_out_at' => [
+            'from_date' => [
                 'nullable',
                 'date',
-                'after_or_equal:check_in_at',
             ],
 
-            'remarks' => [
+            'to_date' => [
                 'nullable',
-                'string',
+                'date',
+                'after_or_equal:from_date',
+            ],
+
+            'per_page' => [
+                'nullable',
+                'integer',
+                'min:1',
+                'max:100',
             ],
 
         ];

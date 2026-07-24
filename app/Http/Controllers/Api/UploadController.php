@@ -4,18 +4,17 @@ namespace App\Http\Controllers\Api;
 
 use App\Models\User;
 use App\Models\Institution;
-use Illuminate\Http\Request;
+use App\Http\Requests\UploadProfilePhotoRequest;
+use App\Http\Requests\UploadInstitutionLogoRequest;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Controller;
 use Illuminate\Support\Facades\Storage;
 
 class UploadController extends Controller
 {
-    public function uploadProfilePhoto(Request $request): JsonResponse
+    public function uploadProfilePhoto(UploadProfilePhotoRequest $request): JsonResponse
     {
-        $request->validate([
-            'profile_photo' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
-        ]);
+        $request->validated();
 
         $user = $request->user();
 
@@ -35,11 +34,9 @@ class UploadController extends Controller
         ]);
     }
 
-    public function uploadInstitutionLogo(Request $request, Institution $institution): JsonResponse
+    public function uploadInstitutionLogo(UploadInstitutionLogoRequest $request, Institution $institution): JsonResponse
     {
-        $request->validate([
-            'logo' => ['required', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
-        ]);
+        $request->validated();
 
         if ($institution->logo && Storage::disk('public')->exists($institution->logo)) {
             Storage::disk('public')->delete($institution->logo);

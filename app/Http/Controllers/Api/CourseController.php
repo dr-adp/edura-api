@@ -4,7 +4,6 @@ namespace App\Http\Controllers\Api;
 
 use App\Models\Course;
 use Illuminate\Support\Str;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Api\BaseApiController;
 use Illuminate\Support\Facades\Auth;
@@ -157,10 +156,7 @@ class CourseController extends BaseApiController
     | Authorization Check
     |--------------------------------------------------------------------------
     */
-        $this->authorizeCourseAccess(
-            institutionId: $validated['institution_id'] ?? null,
-            teacherProfileId: $validated['teacher_profile_id'] ?? null
-        );
+        $this->authorize('create', Course::class);
 
         /*
     |--------------------------------------------------------------------------
@@ -189,9 +185,7 @@ class CourseController extends BaseApiController
 
     public function show(Course $course): JsonResponse
     {
-        $this->authorizeCourseAccess(
-            course: $course
-        );
+        $this->authorize('view', $course);
 
         return $this->successResponse(
             $course->load([
@@ -211,9 +205,7 @@ class CourseController extends BaseApiController
     | Existing Course Authorization
     |--------------------------------------------------------------------------
     */
-        $this->authorizeCourseAccess(
-            course: $course
-        );
+        $this->authorize('update', $course);
 
         /** @var User $user */
         $user = Auth::user();
@@ -323,9 +315,7 @@ class CourseController extends BaseApiController
     | Authorization
     |--------------------------------------------------------------------------
     */
-        $this->authorizeCourseAccess(
-            course: $course
-        );
+        $this->authorize('delete', $course);
 
         $course->delete();
 

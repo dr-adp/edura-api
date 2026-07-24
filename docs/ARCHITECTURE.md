@@ -28,3 +28,9 @@ Design Rules:
 * Keep APIs role protected
 * GitHub is source of truth
 
+
+Architecture Milestone – Form Request Foundation Complete
+All API controllers have been migrated to dedicated Laravel Form Requests.
+A Service Layer has been introduced and will be expanded selectively for business-critical modules rather than every CRUD controller.
+Future development will follow a business-module hardening approach, focusing on maintainability, transactions, authorization, events, performance, and testing before adding new features.
+

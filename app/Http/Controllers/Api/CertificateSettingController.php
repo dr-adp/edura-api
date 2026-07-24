@@ -3,7 +3,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Models\CertificateSetting;
-use Illuminate\Http\Request;
+use App\Http\Requests\StoreCertificateSettingRequest;
+use App\Http\Requests\UpdateCertificateSettingRequest;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Controller;
 use Illuminate\Support\Facades\Storage;
@@ -22,26 +23,9 @@ class CertificateSettingController extends Controller
         ]);
     }
 
-    public function store(Request $request): JsonResponse
+    public function store(StoreCertificateSettingRequest $request): JsonResponse
     {
-        $validated = $request->validate([
-            'institution_id' => ['required', 'exists:institutions,id', 'unique:certificate_settings,institution_id'],
-            'certificate_title' => ['nullable', 'string', 'max:255'],
-            'certificate_subtitle' => ['nullable', 'string', 'max:255'],
-            'authorized_person_name' => ['nullable', 'string', 'max:255'],
-            'authorized_person_designation' => ['nullable', 'string', 'max:255'],
-            'secondary_signatory_name' => ['nullable', 'string', 'max:255'],
-            'secondary_signatory_designation' => ['nullable', 'string', 'max:255'],
-            'verification_url' => ['nullable', 'string', 'max:1000'],
-            'show_qr_code' => ['nullable', 'boolean'],
-            'footer_text' => ['nullable', 'string'],
-            'logo' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
-            'institution_seal' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
-            'certificate_background' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:4096'],
-            'signature_image' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
-            'secondary_signature_image' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         foreach (
             [
@@ -73,25 +57,9 @@ class CertificateSettingController extends Controller
         ]);
     }
 
-    public function update(Request $request, CertificateSetting $certificateSetting): JsonResponse
+    public function update(UpdateCertificateSettingRequest $request, CertificateSetting $certificateSetting): JsonResponse
     {
-        $validated = $request->validate([
-            'certificate_title' => ['nullable', 'string', 'max:255'],
-            'certificate_subtitle' => ['nullable', 'string', 'max:255'],
-            'authorized_person_name' => ['nullable', 'string', 'max:255'],
-            'authorized_person_designation' => ['nullable', 'string', 'max:255'],
-            'secondary_signatory_name' => ['nullable', 'string', 'max:255'],
-            'secondary_signatory_designation' => ['nullable', 'string', 'max:255'],
-            'verification_url' => ['nullable', 'string', 'max:1000'],
-            'show_qr_code' => ['nullable', 'boolean'],
-            'footer_text' => ['nullable', 'string'],
-            'logo' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
-            'institution_seal' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
-            'certificate_background' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:4096'],
-            'signature_image' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
-            'secondary_signature_image' => ['nullable', 'image', 'mimes:jpg,jpeg,png,webp', 'max:2048'],
-            'status' => ['nullable', 'in:active,inactive'],
-        ]);
+        $validated = $request->validated();
 
         foreach (
             [

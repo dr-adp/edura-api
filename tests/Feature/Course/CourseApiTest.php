@@ -6,8 +6,7 @@ use Tests\TestCase;
 
 class CourseApiTest extends TestCase
 {
-    /** @test */
-    public function example_test(): void
+    public function test_application_home_route_returns_successful_response(): void
     {
         $response = $this->get('/');
 

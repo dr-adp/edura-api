@@ -5,6 +5,7 @@ use App\Http\Controllers\Api\AssignmentEvaluationController;
 use App\Http\Controllers\Api\AssignmentSubmissionController;
 use App\Http\Controllers\Api\AttendanceRecordController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AICreditTransactionController;
 use App\Http\Controllers\Api\BatchController;
 use App\Http\Controllers\Api\CertificateController;
 use App\Http\Controllers\Api\CertificateSettingController;
@@ -13,7 +14,9 @@ use App\Http\Controllers\Api\CourseEnrollmentController;
 use App\Http\Controllers\Api\CourseSectionController;
 use App\Http\Controllers\Api\DepartmentController;
 use App\Http\Controllers\Api\GradebookController;
+use App\Http\Controllers\Api\FeatureController;
 use App\Http\Controllers\Api\InstitutionController;
+use App\Http\Controllers\Api\InstitutionSettingController;
 use App\Http\Controllers\Api\InstitutionSubscriptionController;
 use App\Http\Controllers\Api\InstitutionUserController;
 use App\Http\Controllers\Api\LessonController;
@@ -22,6 +25,7 @@ use App\Http\Controllers\Api\LessonResourceController;
 use App\Http\Controllers\Api\LiveClassAttendanceController;
 use App\Http\Controllers\Api\LiveClassController;
 use App\Http\Controllers\Api\ParentProfileController;
+use App\Http\Controllers\Api\PlanFeatureController;
 use App\Http\Controllers\Api\QuestionBankController;
 use App\Http\Controllers\Api\QuestionOptionController;
 use App\Http\Controllers\Api\QuizAnswerController;
@@ -30,9 +34,11 @@ use App\Http\Controllers\Api\QuizController;
 use App\Http\Controllers\Api\QuizQuestionController;
 use App\Http\Controllers\Api\StudentDashboardController;
 use App\Http\Controllers\Api\StudentProfileController;
+use App\Http\Controllers\Api\SubscriptionController;
 use App\Http\Controllers\Api\SubscriptionPlanController;
 use App\Http\Controllers\Api\TeacherProfileController;
 use App\Http\Controllers\Api\UploadController;
+use App\Http\Controllers\Api\UsageStatisticController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -84,11 +90,6 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::apiResource('institutions', InstitutionController::class);
 
         Route::apiResource(
-            'subscription-plans',
-            SubscriptionPlanController::class
-        );
-
-        Route::apiResource(
             'institution-subscriptions',
             InstitutionSubscriptionController::class
         );
@@ -106,6 +107,65 @@ Route::middleware(['auth:sanctum'])->group(function () {
     */
 
     Route::middleware(['role:super-admin|institution-admin'])->group(function () {
+
+        Route::apiResource(
+            'subscription-plans',
+            SubscriptionPlanController::class
+        );
+
+        Route::post(
+            '/subscriptions/{subscription}/activate',
+            [SubscriptionController::class, 'activate']
+        );
+
+        Route::post(
+            '/subscriptions/{subscription}/suspend',
+            [SubscriptionController::class, 'suspend']
+        );
+
+        Route::post(
+            '/subscriptions/{subscription}/cancel',
+            [SubscriptionController::class, 'cancel']
+        );
+
+        Route::post(
+            '/subscriptions/{subscription}/expire',
+            [SubscriptionController::class, 'expire']
+        );
+
+        Route::apiResource(
+            'subscriptions',
+            SubscriptionController::class
+        );
+
+        Route::apiResource(
+            'features',
+            FeatureController::class
+        );
+
+        Route::apiResource(
+            'plan-features',
+            PlanFeatureController::class
+        );
+
+        Route::apiResource(
+            'institution-settings',
+            InstitutionSettingController::class
+        );
+
+        Route::apiResource(
+            'ai-credit-transactions',
+            AICreditTransactionController::class
+        )->only([
+            'index',
+            'store',
+            'show',
+        ]);
+
+        Route::apiResource(
+            'usage-statistics',
+            UsageStatisticController::class
+        );
 
         Route::apiResource('departments', DepartmentController::class);
         Route::apiResource('batches', BatchController::class);

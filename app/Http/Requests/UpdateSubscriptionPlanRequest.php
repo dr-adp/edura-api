@@ -28,10 +28,14 @@ class UpdateSubscriptionPlanRequest extends FormRequest
 
             'price' => ['sometimes', 'required', 'numeric', 'min:0'],
             'billing_cycle' => ['sometimes', 'required', 'in:monthly,yearly'],
+            'trial_days' => ['sometimes', 'required', 'integer', 'min:0'],
             'max_teachers' => ['sometimes', 'required', 'integer', 'min:1'],
             'max_students' => ['sometimes', 'required', 'integer', 'min:1'],
             'max_courses' => ['sometimes', 'required', 'integer', 'min:1'],
             'storage_limit_mb' => ['sometimes', 'required', 'integer', 'min:100'],
+            'included_ai_credits' => ['sometimes', 'required', 'numeric', 'min:0'],
+            'api_request_limit' => ['nullable', 'integer', 'min:1'],
+            'limits' => ['nullable', 'array'],
             'allow_live_classes' => ['boolean'],
             'allow_recorded_classes' => ['boolean'],
             'allow_ai_reports' => ['boolean'],
@@ -39,7 +43,9 @@ class UpdateSubscriptionPlanRequest extends FormRequest
             'allow_noticeboard' => ['boolean'],
             'allow_notes_upload' => ['boolean'],
             'description' => ['nullable', 'string'],
+            'metadata' => ['nullable', 'array'],
             'status' => ['nullable', 'in:active,inactive'],
+            'sort_order' => ['nullable', 'integer', 'min:0'],
         ];
     }
 }

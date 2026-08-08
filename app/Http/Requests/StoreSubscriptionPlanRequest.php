@@ -18,10 +18,14 @@ class StoreSubscriptionPlanRequest extends FormRequest
             'code' => ['required', 'string', 'max:50', 'unique:subscription_plans,code'],
             'price' => ['required', 'numeric', 'min:0'],
             'billing_cycle' => ['required', 'in:monthly,yearly'],
+            'trial_days' => ['nullable', 'integer', 'min:0'],
             'max_teachers' => ['required', 'integer', 'min:1'],
             'max_students' => ['required', 'integer', 'min:1'],
             'max_courses' => ['required', 'integer', 'min:1'],
             'storage_limit_mb' => ['required', 'integer', 'min:100'],
+            'included_ai_credits' => ['nullable', 'numeric', 'min:0'],
+            'api_request_limit' => ['nullable', 'integer', 'min:1'],
+            'limits' => ['nullable', 'array'],
             'allow_live_classes' => ['boolean'],
             'allow_recorded_classes' => ['boolean'],
             'allow_ai_reports' => ['boolean'],
@@ -29,7 +33,9 @@ class StoreSubscriptionPlanRequest extends FormRequest
             'allow_noticeboard' => ['boolean'],
             'allow_notes_upload' => ['boolean'],
             'description' => ['nullable', 'string'],
+            'metadata' => ['nullable', 'array'],
             'status' => ['nullable', 'in:active,inactive'],
+            'sort_order' => ['nullable', 'integer', 'min:0'],
         ];
     }
 }

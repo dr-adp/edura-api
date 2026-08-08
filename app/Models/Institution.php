@@ -52,6 +52,36 @@ class Institution extends Model
             ->latestOfMany();
     }
 
+    public function saasSubscriptions()
+    {
+        return $this->hasMany(Subscription::class);
+    }
+
+    public function currentSaasSubscription()
+    {
+        return $this->hasOne(Subscription::class)
+            ->whereIn('status', [
+                Subscription::STATUS_TRIAL,
+                Subscription::STATUS_ACTIVE,
+            ])
+            ->latestOfMany();
+    }
+
+    public function settings()
+    {
+        return $this->hasMany(InstitutionSetting::class);
+    }
+
+    public function aiCreditTransactions()
+    {
+        return $this->hasMany(AICreditTransaction::class);
+    }
+
+    public function usageStatistics()
+    {
+        return $this->hasMany(UsageStatistic::class);
+    }
+
     public function departments()
     {
         return $this->hasMany(Department::class);

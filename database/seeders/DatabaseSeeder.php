@@ -12,6 +12,8 @@ class DatabaseSeeder extends Seeder
             RoleSeeder::class,
             AdminUserSeeder::class,
             SubscriptionPlanSeeder::class,
+            FeatureSeeder::class,
+            PlanFeatureSeeder::class,
             RolesAndPermissionsSeeder::class,
         ]);
 

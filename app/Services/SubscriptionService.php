@@ -7,12 +7,15 @@ use App\Models\Institution;
 use App\Models\Subscription;
 use App\Models\SubscriptionPlan;
 use Carbon\Carbon;
-use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class SubscriptionService
 {
+    public function __construct(
+        private readonly AuditLogService $auditLogService
+    ) {}
+
     public function create(array $data): Subscription
     {
         return DB::transaction(function () use ($data) {
@@ -42,7 +45,25 @@ class SubscriptionService
                     ?? $this->periodEndsAt($startsAt, $billingCycle),
             ]));
 
-            return $subscription->load(['institution', 'subscriptionPlan']);
+            $subscription = $subscription->load([
+                'institution',
+                'subscriptionPlan',
+            ]);
+
+            $this->auditLogService->recordCustom(
+                action: 'subscription_created',
+                description: 'Subscription created.',
+                auditable: $subscription,
+                institutionId: (int) $subscription->institution_id,
+                module: 'Subscription',
+                metadata: [
+                    'subscription_plan_id' => $subscription->subscription_plan_id,
+                    'status' => $subscription->status,
+                    'billing_cycle' => $subscription->billing_cycle,
+                ]
+            );
+
+            return $subscription;
         });
     }
 
@@ -63,9 +84,26 @@ class SubscriptionService
                 );
             }
 
+            $oldValues = $subscription->getAttributes();
+
             $subscription->update($data);
 
-            return $subscription->fresh()->load(['institution', 'subscriptionPlan']);
+            $subscription = $subscription->fresh()->load([
+                'institution',
+                'subscriptionPlan',
+            ]);
+
+            $this->auditLogService->recordCustom(
+                action: 'subscription_updated',
+                description: 'Subscription updated.',
+                auditable: $subscription,
+                institutionId: (int) $subscription->institution_id,
+                module: 'Subscription',
+                oldValues: $oldValues,
+                newValues: $subscription->getAttributes()
+            );
+
+            return $subscription;
         });
     }
 
@@ -89,7 +127,23 @@ class SubscriptionService
                     ?? $this->periodEndsAt(now(), $subscription->billing_cycle),
             ]);
 
-            return $subscription->fresh()->load(['institution', 'subscriptionPlan']);
+            $subscription = $subscription->fresh()->load([
+                'institution',
+                'subscriptionPlan',
+            ]);
+
+            $this->auditLogService->recordCustom(
+                action: 'subscription_activated',
+                description: 'Subscription activated.',
+                auditable: $subscription,
+                institutionId: (int) $subscription->institution_id,
+                module: 'Subscription',
+                metadata: [
+                    'subscription_plan_id' => $subscription->subscription_plan_id,
+                ]
+            );
+
+            return $subscription;
         });
     }
 
@@ -103,7 +157,20 @@ class SubscriptionService
                 'suspended_at' => now(),
             ]);
 
-            return $subscription->fresh()->load(['institution', 'subscriptionPlan']);
+            $subscription = $subscription->fresh()->load([
+                'institution',
+                'subscriptionPlan',
+            ]);
+
+            $this->auditLogService->recordCustom(
+                action: 'subscription_suspended',
+                description: 'Subscription suspended.',
+                auditable: $subscription,
+                institutionId: (int) $subscription->institution_id,
+                module: 'Subscription'
+            );
+
+            return $subscription;
         });
     }
 
@@ -118,7 +185,20 @@ class SubscriptionService
                 'expires_at' => now(),
             ]);
 
-            return $subscription->fresh()->load(['institution', 'subscriptionPlan']);
+            $subscription = $subscription->fresh()->load([
+                'institution',
+                'subscriptionPlan',
+            ]);
+
+            $this->auditLogService->recordCustom(
+                action: 'subscription_cancelled',
+                description: 'Subscription cancelled.',
+                auditable: $subscription,
+                institutionId: (int) $subscription->institution_id,
+                module: 'Subscription'
+            );
+
+            return $subscription;
         });
     }
 
@@ -130,14 +210,27 @@ class SubscriptionService
                 'expires_at' => now(),
             ]);
 
-            return $subscription->fresh()->load(['institution', 'subscriptionPlan']);
+            $subscription = $subscription->fresh()->load([
+                'institution',
+                'subscriptionPlan',
+            ]);
+
+            $this->auditLogService->recordCustom(
+                action: 'subscription_expired',
+                description: 'Subscription expired.',
+                auditable: $subscription,
+                institutionId: (int) $subscription->institution_id,
+                module: 'Subscription'
+            );
+
+            return $subscription;
         });
     }
 
     public function delete(Subscription $subscription): bool
     {
         return DB::transaction(
-            fn (): bool => (bool) $subscription->delete()
+            fn(): bool => (bool) $subscription->delete()
         );
     }
 
@@ -155,8 +248,9 @@ class SubscriptionService
             ->first();
     }
 
-    public function currentPlanForInstitution(Institution|int $institution): ?SubscriptionPlan
-    {
+    public function currentPlanForInstitution(
+        Institution|int $institution
+    ): ?SubscriptionPlan {
         $subscription = $this->currentForInstitution($institution);
 
         if ($subscription?->subscriptionPlan) {
@@ -169,9 +263,9 @@ class SubscriptionService
 
         return $institutionModel
             ? $institutionModel->activeSubscription()
-                ->with('subscriptionPlan.planFeatures.feature')
-                ->first()
-                ?->subscriptionPlan
+            ->with('subscriptionPlan.planFeatures.feature')
+            ->first()
+            ?->subscriptionPlan
             : null;
     }
 
@@ -192,7 +286,7 @@ class SubscriptionService
             ->current()
             ->when(
                 $exceptSubscriptionId,
-                fn ($query) => $query->whereKeyNot($exceptSubscriptionId)
+                fn($query) => $query->whereKeyNot($exceptSubscriptionId)
             )
             ->update([
                 'status' => Subscription::STATUS_EXPIRED,
@@ -226,8 +320,10 @@ class SubscriptionService
             : $startsAt->copy();
     }
 
-    private function periodEndsAt(Carbon $startsAt, string $billingCycle): Carbon
-    {
+    private function periodEndsAt(
+        Carbon $startsAt,
+        string $billingCycle
+    ): Carbon {
         return $billingCycle === 'monthly'
             ? $startsAt->copy()->addMonth()
             : $startsAt->copy()->addYear();

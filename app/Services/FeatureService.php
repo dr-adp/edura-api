@@ -11,12 +11,14 @@ use Illuminate\Support\Facades\DB;
 class FeatureService
 {
     public function __construct(
-        private readonly SubscriptionService $subscriptionService
-    ) {
-    }
+        private readonly SubscriptionService $subscriptionService,
+        private readonly AuditLogService $auditLogService
+    ) {}
 
-    public function enabled(Institution|int $institution, string $featureCode): bool
-    {
+    public function enabled(
+        Institution|int $institution,
+        string $featureCode
+    ): bool {
         $plan = $this->subscriptionService
             ->currentPlanForInstitution($institution);
 
@@ -34,8 +36,10 @@ class FeatureService
             ->exists();
     }
 
-    public function assertEnabled(Institution|int $institution, string $featureCode): void
-    {
+    public function assertEnabled(
+        Institution|int $institution,
+        string $featureCode
+    ): void {
         if (!$this->enabled($institution, $featureCode)) {
             throw new DomainException(
                 "Feature [{$featureCode}] is not enabled for this institution."
@@ -46,7 +50,9 @@ class FeatureService
     public function assignToPlan(array $data): PlanFeature
     {
         return DB::transaction(function () use ($data) {
-            Feature::query()->active()->findOrFail($data['feature_id']);
+            Feature::query()
+                ->active()
+                ->findOrFail($data['feature_id']);
 
             $planFeature = PlanFeature::updateOrCreate(
                 [
@@ -61,7 +67,26 @@ class FeatureService
                 ]
             );
 
-            return $planFeature->load(['subscriptionPlan', 'feature']);
+            $planFeature = $planFeature->load([
+                'subscriptionPlan',
+                'feature',
+            ]);
+
+            $this->auditLogService->recordCustom(
+                action: 'plan_feature_assigned',
+                description: 'Feature assigned to subscription plan.',
+                auditable: $planFeature,
+                module: 'Feature',
+                metadata: [
+                    'subscription_plan_id' => $planFeature->subscription_plan_id,
+                    'feature_id' => $planFeature->feature_id,
+                    'feature_code' => $planFeature->feature?->code,
+                    'enabled' => $planFeature->enabled,
+                ],
+                useAuthenticatedUser: true
+            );
+
+            return $planFeature;
         });
     }
 
@@ -70,16 +95,47 @@ class FeatureService
         array $data
     ): PlanFeature {
         return DB::transaction(function () use ($planFeature, $data) {
+            $oldValues = $planFeature->getAttributes();
+
             $planFeature->update($data);
 
-            return $planFeature->fresh()->load(['subscriptionPlan', 'feature']);
+            $planFeature = $planFeature->fresh()->load([
+                'subscriptionPlan',
+                'feature',
+            ]);
+
+            $this->auditLogService->recordCustom(
+                action: 'plan_feature_updated',
+                description: 'Subscription plan feature updated.',
+                auditable: $planFeature,
+                module: 'Feature',
+                oldValues: $oldValues,
+                newValues: $planFeature->getAttributes(),
+                metadata: [
+                    'subscription_plan_id' => $planFeature->subscription_plan_id,
+                    'feature_id' => $planFeature->feature_id,
+                    'feature_code' => $planFeature->feature?->code,
+                ]
+            );
+
+            return $planFeature;
         });
     }
 
     public function deletePlanFeature(PlanFeature $planFeature): bool
     {
-        return DB::transaction(
-            fn (): bool => (bool) $planFeature->delete()
-        );
+        return DB::transaction(function () use ($planFeature) {
+            $oldValues = $planFeature->getAttributes();
+
+            $this->auditLogService->recordCustom(
+                action: 'plan_feature_removed',
+                description: 'Feature removed from subscription plan.',
+                auditable: $planFeature,
+                module: 'Feature',
+                oldValues: $oldValues
+            );
+
+            return (bool) $planFeature->delete();
+        });
     }
 }

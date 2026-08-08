@@ -2,6 +2,14 @@
 
 namespace Tests\Feature;
 
+use App\Models\Feature;
+use App\Models\PlanFeature;
+use App\Models\Subscription;
+use App\Models\SubscriptionPlan;
+use App\Services\AICreditService;
+use App\Services\FeatureService;
+use App\Services\SubscriptionService;
+
 use App\Events\AuditLogRequested;
 use App\Models\ActivityLog;
 use App\Models\Course;
@@ -37,7 +45,7 @@ class AuditLogTest extends TestCase
             'status' => 'active',
         ]);
         $request = Request::create(
-            '/api/institution-settings/'.$setting->id,
+            '/api/institution-settings/' . $setting->id,
             'PATCH',
             server: [
                 'REMOTE_ADDR' => '203.0.113.10',
@@ -177,20 +185,20 @@ class AuditLogTest extends TestCase
             ->assertJsonCount(1, 'data.data')
             ->assertJsonPath('data.data.0.action', 'updated');
 
-        $this->getJson('/api/audit-logs?user_id='.$actor->id.'&per_page=10')
+        $this->getJson('/api/audit-logs?user_id=' . $actor->id . '&per_page=10')
             ->assertOk()
             ->assertJsonCount(2, 'data.data');
 
-        $this->getJson('/api/audit-logs?auditable_type='.urlencode(Course::class).'&per_page=10')
+        $this->getJson('/api/audit-logs?auditable_type=' . urlencode(Course::class) . '&per_page=10')
             ->assertOk()
             ->assertJsonCount(1, 'data.data')
             ->assertJsonPath('data.data.0.id', $target->id);
 
-        $this->getJson('/api/audit-logs?date_from='.now()->subDays(2)->toDateString().'&date_to='.now()->toDateString().'&per_page=10')
+        $this->getJson('/api/audit-logs?date_from=' . now()->subDays(2)->toDateString() . '&date_to=' . now()->toDateString() . '&per_page=10')
             ->assertOk()
             ->assertJsonCount(2, 'data.data');
 
-        $this->getJson('/api/audit-logs?search='.urlencode('Feature assigned').'&per_page=10')
+        $this->getJson('/api/audit-logs?search=' . urlencode('Feature assigned') . '&per_page=10')
             ->assertOk()
             ->assertJsonCount(1, 'data.data')
             ->assertJsonPath('data.data.0.id', $target->id);
@@ -215,10 +223,10 @@ class AuditLogTest extends TestCase
         $this->getJson('/api/audit-logs')->assertForbidden();
 
         $this->authenticate($admin);
-        $this->getJson('/api/audit-logs/'.$otherTenantLog->id)->assertForbidden();
+        $this->getJson('/api/audit-logs/' . $otherTenantLog->id)->assertForbidden();
 
         $this->authenticate($superAdmin);
-        $this->getJson('/api/audit-logs/'.$otherTenantLog->id)
+        $this->getJson('/api/audit-logs/' . $otherTenantLog->id)
             ->assertOk()
             ->assertJsonPath('data.id', $otherTenantLog->id);
     }
@@ -300,10 +308,124 @@ class AuditLogTest extends TestCase
         ]);
     }
 
+    public function test_subscription_service_records_activation_audit(): void
+    {
+        $institution = $this->createInstitution('AUDIT-SUBSCRIPTION');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $plan = SubscriptionPlan::create([
+            'name' => 'Audit Test Plan',
+            'code' => 'AUDIT-TEST-PLAN',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $subscription = Subscription::create([
+            'uuid' => (string) Str::uuid(),
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => Subscription::STATUS_TRIAL,
+            'billing_cycle' => 'monthly',
+            'starts_at' => now(),
+            'trial_ends_at' => now()->addDays(14),
+            'current_period_starts_at' => now(),
+            'current_period_ends_at' => now()->addMonth(),
+        ]);
+
+        $this->authenticate($admin);
+
+        $result = app(SubscriptionService::class)->activate($subscription);
+
+        $this->assertSame(
+            Subscription::STATUS_ACTIVE,
+            $result->status
+        );
+
+        $this->assertDatabaseHas('activity_logs', [
+            'institution_id' => $institution->id,
+            'user_id' => $admin->id,
+            'module' => 'Subscription',
+            'action' => 'subscription_activated',
+            'auditable_type' => Subscription::class,
+            'auditable_id' => $subscription->id,
+        ]);
+    }
+
+    public function test_feature_service_records_plan_feature_assignment_audit(): void
+    {
+        $admin = $this->createUserWithRole('super-admin');
+
+        $plan = SubscriptionPlan::create([
+            'name' => 'Feature Audit Plan',
+            'code' => 'FEATURE-AUDIT-PLAN',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $feature = Feature::create([
+            'name' => 'AI Reports Audit Test',
+            'code' => 'audit_ai_reports',
+            'description' => 'Audit test feature.',
+            'status' => 'active',
+        ]);
+
+        $this->authenticate($admin);
+
+        $planFeature = app(FeatureService::class)->assignToPlan([
+            'subscription_plan_id' => $plan->id,
+            'feature_id' => $feature->id,
+            'enabled' => true,
+            'status' => 'active',
+        ]);
+
+        $this->assertDatabaseHas('activity_logs', [
+            'user_id' => $admin->id,
+            'module' => 'Feature',
+            'action' => 'plan_feature_assigned',
+            'auditable_type' => PlanFeature::class,
+            'auditable_id' => $planFeature->id,
+        ]);
+    }
+
+    public function test_ai_credit_service_records_credit_audit(): void
+    {
+        $institution = $this->createInstitution('AUDIT-AI-CREDIT');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $this->authenticate($admin);
+
+        $transaction = app(AICreditService::class)->grant([
+            'institution_id' => $institution->id,
+            'credits' => 100,
+            'description' => 'Initial AI credit grant.',
+        ]);
+
+        $this->assertDatabaseHas('activity_logs', [
+            'institution_id' => $institution->id,
+            'user_id' => $admin->id,
+            'module' => 'AICredit',
+            'action' => 'ai_credits_granted',
+            'auditable_type' => $transaction::class,
+            'auditable_id' => $transaction->id,
+        ]);
+    }
+
     private function createInstitution(string $code): Institution
     {
         return Institution::create([
-            'name' => 'Institution '.$code,
+            'name' => 'Institution ' . $code,
             'code' => $code,
         ]);
     }

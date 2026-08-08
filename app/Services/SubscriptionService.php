@@ -19,6 +19,10 @@ class SubscriptionService
     public function create(array $data): Subscription
     {
         return DB::transaction(function () use ($data) {
+            $institution = $this->lockInstitution(
+                (int) $data['institution_id']
+            );
+
             $plan = SubscriptionPlan::query()
                 ->active()
                 ->findOrFail($data['subscription_plan_id']);
@@ -28,7 +32,7 @@ class SubscriptionService
             $billingCycle = $data['billing_cycle'] ?? $plan->billing_cycle;
 
             $this->closeCurrentSubscriptions(
-                (int) $data['institution_id'],
+                $institution->id,
                 $status
             );
 
@@ -54,7 +58,7 @@ class SubscriptionService
                 action: 'subscription_created',
                 description: 'Subscription created.',
                 auditable: $subscription,
-                institutionId: (int) $subscription->institution_id,
+                institutionId: $institution->id,
                 module: 'Subscription',
                 metadata: [
                     'subscription_plan_id' => $subscription->subscription_plan_id,
@@ -67,19 +71,32 @@ class SubscriptionService
         });
     }
 
-    public function update(Subscription $subscription, array $data): Subscription
-    {
+    public function update(
+        Subscription $subscription,
+        array $data
+    ): Subscription {
         return DB::transaction(function () use ($subscription, $data) {
+            $institution = $this->lockInstitution(
+                (int) $subscription->institution_id
+            );
+
+            $currentStatus = $subscription->status;
+            $newStatus = $data['status'] ?? $currentStatus;
+
+            $this->ensureValidTransition(
+                $currentStatus,
+                $newStatus
+            );
+
             if (
-                isset($data['status']) &&
-                in_array($data['status'], [
+                in_array($newStatus, [
                     Subscription::STATUS_TRIAL,
                     Subscription::STATUS_ACTIVE,
                 ], true)
             ) {
                 $this->closeCurrentSubscriptions(
-                    (int) $subscription->institution_id,
-                    $data['status'],
+                    $institution->id,
+                    $newStatus,
                     $subscription->id
                 );
             }
@@ -97,7 +114,7 @@ class SubscriptionService
                 action: 'subscription_updated',
                 description: 'Subscription updated.',
                 auditable: $subscription,
-                institutionId: (int) $subscription->institution_id,
+                institutionId: $institution->id,
                 module: 'Subscription',
                 oldValues: $oldValues,
                 newValues: $subscription->getAttributes()
@@ -110,8 +127,17 @@ class SubscriptionService
     public function activate(Subscription $subscription): Subscription
     {
         return DB::transaction(function () use ($subscription) {
+            $institution = $this->lockInstitution(
+                (int) $subscription->institution_id
+            );
+
+            $this->ensureValidTransition(
+                $subscription->status,
+                Subscription::STATUS_ACTIVE
+            );
+
             $this->closeCurrentSubscriptions(
-                (int) $subscription->institution_id,
+                $institution->id,
                 Subscription::STATUS_ACTIVE,
                 $subscription->id
             );
@@ -124,7 +150,10 @@ class SubscriptionService
                 'current_period_starts_at' => $subscription->current_period_starts_at
                     ?? now(),
                 'current_period_ends_at' => $subscription->current_period_ends_at
-                    ?? $this->periodEndsAt(now(), $subscription->billing_cycle),
+                    ?? $this->periodEndsAt(
+                        now(),
+                        $subscription->billing_cycle
+                    ),
             ]);
 
             $subscription = $subscription->fresh()->load([
@@ -136,7 +165,7 @@ class SubscriptionService
                 action: 'subscription_activated',
                 description: 'Subscription activated.',
                 auditable: $subscription,
-                institutionId: (int) $subscription->institution_id,
+                institutionId: $institution->id,
                 module: 'Subscription',
                 metadata: [
                     'subscription_plan_id' => $subscription->subscription_plan_id,
@@ -150,7 +179,14 @@ class SubscriptionService
     public function suspend(Subscription $subscription): Subscription
     {
         return DB::transaction(function () use ($subscription) {
-            $this->ensureNotFinal($subscription);
+            $institution = $this->lockInstitution(
+                (int) $subscription->institution_id
+            );
+
+            $this->ensureValidTransition(
+                $subscription->status,
+                Subscription::STATUS_SUSPENDED
+            );
 
             $subscription->update([
                 'status' => Subscription::STATUS_SUSPENDED,
@@ -166,7 +202,7 @@ class SubscriptionService
                 action: 'subscription_suspended',
                 description: 'Subscription suspended.',
                 auditable: $subscription,
-                institutionId: (int) $subscription->institution_id,
+                institutionId: $institution->id,
                 module: 'Subscription'
             );
 
@@ -177,7 +213,14 @@ class SubscriptionService
     public function cancel(Subscription $subscription): Subscription
     {
         return DB::transaction(function () use ($subscription) {
-            $this->ensureNotFinal($subscription);
+            $institution = $this->lockInstitution(
+                (int) $subscription->institution_id
+            );
+
+            $this->ensureValidTransition(
+                $subscription->status,
+                Subscription::STATUS_CANCELLED
+            );
 
             $subscription->update([
                 'status' => Subscription::STATUS_CANCELLED,
@@ -194,7 +237,7 @@ class SubscriptionService
                 action: 'subscription_cancelled',
                 description: 'Subscription cancelled.',
                 auditable: $subscription,
-                institutionId: (int) $subscription->institution_id,
+                institutionId: $institution->id,
                 module: 'Subscription'
             );
 
@@ -205,6 +248,15 @@ class SubscriptionService
     public function expire(Subscription $subscription): Subscription
     {
         return DB::transaction(function () use ($subscription) {
+            $institution = $this->lockInstitution(
+                (int) $subscription->institution_id
+            );
+
+            $this->ensureValidTransition(
+                $subscription->status,
+                Subscription::STATUS_EXPIRED
+            );
+
             $subscription->update([
                 'status' => Subscription::STATUS_EXPIRED,
                 'expires_at' => now(),
@@ -219,7 +271,7 @@ class SubscriptionService
                 action: 'subscription_expired',
                 description: 'Subscription expired.',
                 auditable: $subscription,
-                institutionId: (int) $subscription->institution_id,
+                institutionId: $institution->id,
                 module: 'Subscription'
             );
 
@@ -229,13 +281,18 @@ class SubscriptionService
 
     public function delete(Subscription $subscription): bool
     {
-        return DB::transaction(
-            fn(): bool => (bool) $subscription->delete()
-        );
+        return DB::transaction(function () use ($subscription) {
+            $this->lockInstitution(
+                (int) $subscription->institution_id
+            );
+
+            return (bool) $subscription->delete();
+        });
     }
 
-    public function currentForInstitution(Institution|int $institution): ?Subscription
-    {
+    public function currentForInstitution(
+        Institution|int $institution
+    ): ?Subscription {
         $institutionId = $institution instanceof Institution
             ? $institution->id
             : $institution;
@@ -269,6 +326,14 @@ class SubscriptionService
             : null;
     }
 
+    private function lockInstitution(int $institutionId): Institution
+    {
+        return Institution::query()
+            ->whereKey($institutionId)
+            ->lockForUpdate()
+            ->firstOrFail();
+    }
+
     private function closeCurrentSubscriptions(
         int $institutionId,
         string $newStatus,
@@ -294,14 +359,59 @@ class SubscriptionService
             ]);
     }
 
-    private function ensureNotFinal(Subscription $subscription): void
-    {
-        if (in_array($subscription->status, [
-            Subscription::STATUS_EXPIRED,
-            Subscription::STATUS_CANCELLED,
-        ], true)) {
+    private function ensureValidTransition(
+        string $currentStatus,
+        string $newStatus
+    ): void {
+        if ($currentStatus === $newStatus) {
+            if (in_array($currentStatus, [
+                Subscription::STATUS_CANCELLED,
+                Subscription::STATUS_EXPIRED,
+            ], true)) {
+                throw new DomainException(
+                    'Finalized subscriptions cannot be changed.'
+                );
+            }
+
+            return;
+        }
+
+        $allowedTransitions = [
+            Subscription::STATUS_TRIAL => [
+                Subscription::STATUS_ACTIVE,
+                Subscription::STATUS_SUSPENDED,
+                Subscription::STATUS_CANCELLED,
+                Subscription::STATUS_EXPIRED,
+            ],
+
+            Subscription::STATUS_ACTIVE => [
+                Subscription::STATUS_SUSPENDED,
+                Subscription::STATUS_CANCELLED,
+                Subscription::STATUS_EXPIRED,
+            ],
+
+            Subscription::STATUS_SUSPENDED => [
+                Subscription::STATUS_ACTIVE,
+                Subscription::STATUS_CANCELLED,
+                Subscription::STATUS_EXPIRED,
+            ],
+
+            Subscription::STATUS_CANCELLED => [],
+
+            Subscription::STATUS_EXPIRED => [],
+        ];
+
+        if (!in_array(
+            $newStatus,
+            $allowedTransitions[$currentStatus] ?? [],
+            true
+        )) {
             throw new DomainException(
-                'Finalized subscriptions cannot be changed.'
+                "Invalid subscription status transition from [{$currentStatus}] to [{$newStatus}].",
+                [
+                    'current_status' => $currentStatus,
+                    'requested_status' => $newStatus,
+                ]
             );
         }
     }

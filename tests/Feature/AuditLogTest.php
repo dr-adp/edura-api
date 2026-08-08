@@ -9,6 +9,7 @@ use App\Models\SubscriptionPlan;
 use App\Services\AICreditService;
 use App\Services\FeatureService;
 use App\Services\SubscriptionService;
+use App\Exceptions\DomainException;
 
 use App\Events\AuditLogRequested;
 use App\Models\ActivityLog;
@@ -420,6 +421,235 @@ class AuditLogTest extends TestCase
             'auditable_type' => $transaction::class,
             'auditable_id' => $transaction->id,
         ]);
+    }
+
+    public function test_subscription_service_allows_trial_to_active_transition(): void
+    {
+        $institution = $this->createInstitution('LIFECYCLE-TRIAL-ACTIVE');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $plan = SubscriptionPlan::create([
+            'name' => 'Lifecycle Trial Plan',
+            'code' => 'LIFECYCLE-TRIAL-PLAN',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $subscription = Subscription::create([
+            'uuid' => (string) \Illuminate\Support\Str::uuid(),
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => Subscription::STATUS_TRIAL,
+            'billing_cycle' => 'monthly',
+            'starts_at' => now(),
+            'trial_ends_at' => now()->addDays(14),
+            'current_period_starts_at' => now(),
+            'current_period_ends_at' => now()->addMonth(),
+        ]);
+
+        $this->authenticate($admin);
+
+        $result = app(SubscriptionService::class)->activate($subscription);
+
+        $this->assertSame(
+            Subscription::STATUS_ACTIVE,
+            $result->status
+        );
+    }
+
+    public function test_subscription_service_allows_active_to_suspended_transition(): void
+    {
+        $institution = $this->createInstitution('LIFECYCLE-ACTIVE-SUSPENDED');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $plan = SubscriptionPlan::create([
+            'name' => 'Lifecycle Active Plan',
+            'code' => 'LIFECYCLE-ACTIVE-PLAN',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $subscription = Subscription::create([
+            'uuid' => (string) \Illuminate\Support\Str::uuid(),
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => Subscription::STATUS_ACTIVE,
+            'billing_cycle' => 'monthly',
+            'starts_at' => now(),
+            'current_period_starts_at' => now(),
+            'current_period_ends_at' => now()->addMonth(),
+        ]);
+
+        $this->authenticate($admin);
+
+        $result = app(SubscriptionService::class)->suspend($subscription);
+
+        $this->assertSame(
+            Subscription::STATUS_SUSPENDED,
+            $result->status
+        );
+    }
+
+    public function test_subscription_service_allows_suspended_to_active_transition(): void
+    {
+        $institution = $this->createInstitution('LIFECYCLE-SUSPENDED-ACTIVE');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $plan = SubscriptionPlan::create([
+            'name' => 'Lifecycle Suspended Plan',
+            'code' => 'LIFECYCLE-SUSPENDED-PLAN',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $subscription = Subscription::create([
+            'uuid' => (string) \Illuminate\Support\Str::uuid(),
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => Subscription::STATUS_SUSPENDED,
+            'billing_cycle' => 'monthly',
+            'starts_at' => now(),
+            'suspended_at' => now(),
+            'current_period_starts_at' => now(),
+            'current_period_ends_at' => now()->addMonth(),
+        ]);
+
+        $this->authenticate($admin);
+
+        $result = app(SubscriptionService::class)->activate($subscription);
+
+        $this->assertSame(
+            Subscription::STATUS_ACTIVE,
+            $result->status
+        );
+    }
+
+    public function test_cancelled_subscription_cannot_be_activated(): void
+    {
+        $institution = $this->createInstitution('LIFECYCLE-CANCELLED');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $plan = SubscriptionPlan::create([
+            'name' => 'Cancelled Lifecycle Plan',
+            'code' => 'LIFECYCLE-CANCELLED-PLAN',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $subscription = Subscription::create([
+            'uuid' => (string) \Illuminate\Support\Str::uuid(),
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => Subscription::STATUS_CANCELLED,
+            'billing_cycle' => 'monthly',
+            'starts_at' => now(),
+            'cancelled_at' => now(),
+            'expires_at' => now(),
+        ]);
+
+        $this->authenticate($admin);
+
+        $this->expectException(DomainException::class);
+
+        app(SubscriptionService::class)->activate($subscription);
+    }
+
+    public function test_expired_subscription_cannot_be_activated(): void
+    {
+        $institution = $this->createInstitution('LIFECYCLE-EXPIRED');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $plan = SubscriptionPlan::create([
+            'name' => 'Expired Lifecycle Plan',
+            'code' => 'LIFECYCLE-EXPIRED-PLAN',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $subscription = Subscription::create([
+            'uuid' => (string) \Illuminate\Support\Str::uuid(),
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => Subscription::STATUS_EXPIRED,
+            'billing_cycle' => 'monthly',
+            'starts_at' => now(),
+            'expires_at' => now(),
+        ]);
+
+        $this->authenticate($admin);
+
+        $this->expectException(DomainException::class);
+
+        app(SubscriptionService::class)->activate($subscription);
+    }
+
+    public function test_active_subscription_cannot_transition_back_to_trial(): void
+    {
+        $institution = $this->createInstitution('LIFECYCLE-ACTIVE-TRIAL');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $plan = SubscriptionPlan::create([
+            'name' => 'Active Trial Prevention Plan',
+            'code' => 'LIFECYCLE-ACTIVE-TRIAL',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $subscription = Subscription::create([
+            'uuid' => (string) \Illuminate\Support\Str::uuid(),
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => Subscription::STATUS_ACTIVE,
+            'billing_cycle' => 'monthly',
+            'starts_at' => now(),
+            'current_period_starts_at' => now(),
+            'current_period_ends_at' => now()->addMonth(),
+        ]);
+
+        $this->authenticate($admin);
+
+        $this->expectException(DomainException::class);
+
+        app(SubscriptionService::class)->update(
+            $subscription,
+            ['status' => Subscription::STATUS_TRIAL]
+        );
     }
 
     private function createInstitution(string $code): Institution

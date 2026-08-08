@@ -660,6 +660,272 @@ class AuditLogTest extends TestCase
         ]);
     }
 
+    public function test_institution_admin_can_view_plan_feature_for_current_subscription_plan(): void
+    {
+        $institution = $this->createInstitution('ENTITLEMENT-CURRENT');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $plan = SubscriptionPlan::create([
+            'name' => 'Entitlement Current Plan',
+            'code' => 'ENTITLEMENT-CURRENT-PLAN',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $feature = Feature::create([
+            'code' => 'entitlement_current_feature',
+            'name' => 'Entitlement Current Feature',
+            'category' => 'testing',
+            'description' => 'Feature for entitlement testing.',
+            'value_type' => 'boolean',
+            'default_value' => ['value' => false],
+            'status' => 'active',
+        ]);
+
+        $planFeature = PlanFeature::create([
+            'subscription_plan_id' => $plan->id,
+            'feature_id' => $feature->id,
+            'enabled' => true,
+            'value' => ['value' => true],
+            'status' => 'active',
+        ]);
+
+        Subscription::create([
+            'uuid' => (string) Str::uuid(),
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => Subscription::STATUS_ACTIVE,
+            'billing_cycle' => 'monthly',
+            'starts_at' => now(),
+            'current_period_starts_at' => now(),
+            'current_period_ends_at' => now()->addMonth(),
+        ]);
+
+        $this->authenticate($admin);
+
+        $response = $this->getJson(
+            "/api/plan-features/{$planFeature->id}"
+        );
+
+        $response->assertOk()
+            ->assertJsonPath(
+                'data.id',
+                $planFeature->id
+            );
+    }
+
+    public function test_institution_admin_cannot_view_plan_feature_from_another_plan(): void
+    {
+        $institution = $this->createInstitution('ENTITLEMENT-OTHER');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $currentPlan = SubscriptionPlan::create([
+            'name' => 'Entitlement Current Plan',
+            'code' => 'ENTITLEMENT-OTHER-CURRENT',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $otherPlan = SubscriptionPlan::create([
+            'name' => 'Entitlement Other Plan',
+            'code' => 'ENTITLEMENT-OTHER-PLAN',
+            'price' => 1999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 20,
+            'max_students' => 200,
+            'max_courses' => 20,
+            'storage_limit_mb' => 2000,
+            'status' => 'active',
+        ]);
+
+        $feature = Feature::create([
+            'code' => 'entitlement_other_feature',
+            'name' => 'Entitlement Other Feature',
+            'category' => 'testing',
+            'description' => 'Feature for cross-plan entitlement testing.',
+            'value_type' => 'boolean',
+            'default_value' => ['value' => false],
+            'status' => 'active',
+        ]);
+
+        $planFeature = PlanFeature::create([
+            'subscription_plan_id' => $otherPlan->id,
+            'feature_id' => $feature->id,
+            'enabled' => true,
+            'value' => ['value' => true],
+            'status' => 'active',
+        ]);
+
+        Subscription::create([
+            'uuid' => (string) Str::uuid(),
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $currentPlan->id,
+            'status' => Subscription::STATUS_ACTIVE,
+            'billing_cycle' => 'monthly',
+            'starts_at' => now(),
+            'current_period_starts_at' => now(),
+            'current_period_ends_at' => now()->addMonth(),
+        ]);
+
+        $this->authenticate($admin);
+
+        $response = $this->getJson(
+            "/api/plan-features/{$planFeature->id}"
+        );
+
+        $response->assertForbidden();
+    }
+
+    public function test_institution_admin_cannot_view_plan_feature_without_current_subscription(): void
+    {
+        $institution = $this->createInstitution('ENTITLEMENT-NO-SUB');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $plan = SubscriptionPlan::create([
+            'name' => 'Entitlement No Subscription Plan',
+            'code' => 'ENTITLEMENT-NO-SUB-PLAN',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $feature = Feature::create([
+            'code' => 'entitlement_no_subscription_feature',
+            'name' => 'Entitlement No Subscription Feature',
+            'category' => 'testing',
+            'description' => 'Feature for no-subscription testing.',
+            'value_type' => 'boolean',
+            'default_value' => ['value' => false],
+            'status' => 'active',
+        ]);
+
+        $planFeature = PlanFeature::create([
+            'subscription_plan_id' => $plan->id,
+            'feature_id' => $feature->id,
+            'enabled' => true,
+            'value' => ['value' => true],
+            'status' => 'active',
+        ]);
+
+        $this->authenticate($admin);
+
+        $response = $this->getJson(
+            "/api/plan-features/{$planFeature->id}"
+        );
+
+        $response->assertForbidden();
+    }
+
+    public function test_plan_feature_index_returns_only_current_subscription_plan_features(): void
+    {
+        $institution = $this->createInstitution('ENTITLEMENT-INDEX');
+        $admin = $this->createInstitutionAdmin($institution);
+
+        $currentPlan = SubscriptionPlan::create([
+            'name' => 'Entitlement Index Current Plan',
+            'code' => 'ENTITLEMENT-INDEX-CURRENT',
+            'price' => 999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 10,
+            'max_students' => 100,
+            'max_courses' => 10,
+            'storage_limit_mb' => 1000,
+            'status' => 'active',
+        ]);
+
+        $otherPlan = SubscriptionPlan::create([
+            'name' => 'Entitlement Index Other Plan',
+            'code' => 'ENTITLEMENT-INDEX-OTHER',
+            'price' => 1999,
+            'billing_cycle' => 'monthly',
+            'trial_days' => 14,
+            'max_teachers' => 20,
+            'max_students' => 200,
+            'max_courses' => 20,
+            'storage_limit_mb' => 2000,
+            'status' => 'active',
+        ]);
+
+        $currentFeature = Feature::create([
+            'code' => 'entitlement_index_current',
+            'name' => 'Entitlement Index Current',
+            'category' => 'testing',
+            'description' => 'Current plan feature.',
+            'value_type' => 'boolean',
+            'default_value' => ['value' => false],
+            'status' => 'active',
+        ]);
+
+        $otherFeature = Feature::create([
+            'code' => 'entitlement_index_other',
+            'name' => 'Entitlement Index Other',
+            'category' => 'testing',
+            'description' => 'Other plan feature.',
+            'value_type' => 'boolean',
+            'default_value' => ['value' => false],
+            'status' => 'active',
+        ]);
+
+        $currentPlanFeature = PlanFeature::create([
+            'subscription_plan_id' => $currentPlan->id,
+            'feature_id' => $currentFeature->id,
+            'enabled' => true,
+            'value' => ['value' => true],
+            'status' => 'active',
+        ]);
+
+        $otherPlanFeature = PlanFeature::create([
+            'subscription_plan_id' => $otherPlan->id,
+            'feature_id' => $otherFeature->id,
+            'enabled' => true,
+            'value' => ['value' => true],
+            'status' => 'active',
+        ]);
+
+        Subscription::create([
+            'uuid' => (string) Str::uuid(),
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $currentPlan->id,
+            'status' => Subscription::STATUS_ACTIVE,
+            'billing_cycle' => 'monthly',
+            'starts_at' => now(),
+            'current_period_starts_at' => now(),
+            'current_period_ends_at' => now()->addMonth(),
+        ]);
+
+        $this->authenticate($admin);
+
+        $response = $this->getJson('/api/plan-features');
+
+        $response->assertOk();
+
+        $ids = collect($response->json('data.data'))
+            ->pluck('id')
+            ->all();
+
+        $this->assertContains($currentPlanFeature->id, $ids);
+        $this->assertNotContains($otherPlanFeature->id, $ids);
+    }
+
     private function createInstitutionAdmin(Institution $institution): User
     {
         $user = $this->createUserWithRole('institution-admin', ['view audit logs']);

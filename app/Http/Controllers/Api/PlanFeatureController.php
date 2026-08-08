@@ -7,25 +7,56 @@ use App\Http\Requests\StorePlanFeatureRequest;
 use App\Http\Requests\UpdatePlanFeatureRequest;
 use App\Models\PlanFeature;
 use App\Services\FeatureService;
+use App\Services\SubscriptionService;
+use App\Support\InstitutionAccess;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class PlanFeatureController extends Controller
 {
     public function __construct(
-        private readonly FeatureService $featureService
-    ) {
-    }
+        private readonly FeatureService $featureService,
+        private readonly InstitutionAccess $institutionAccess,
+        private readonly SubscriptionService $subscriptionService
+    ) {}
 
     public function index(Request $request): JsonResponse
     {
         $this->authorize('viewAny', PlanFeature::class);
 
-        $planFeatures = PlanFeature::with(['subscriptionPlan', 'feature'])
-            ->when(
-                $request->user()->hasRole('institution-admin'),
-                fn ($query) => $query->active()->enabled()
-            )
+        $query = PlanFeature::with([
+            'subscriptionPlan',
+            'feature',
+        ]);
+
+        if ($request->user()->hasRole('institution-admin')) {
+            $institutionId = $this->institutionAccess
+                ->institutionIdFor($request->user());
+
+            if ($institutionId === null) {
+                return response()->json([
+                    'message' => 'No active institution profile found.',
+                    'data' => [],
+                ]);
+            }
+
+            $currentPlan = $this->subscriptionService
+                ->currentPlanForInstitution($institutionId);
+
+            if ($currentPlan === null) {
+                return response()->json([
+                    'message' => 'No active subscription found.',
+                    'data' => [],
+                ]);
+            }
+
+            $query
+                ->where('subscription_plan_id', $currentPlan->id)
+                ->active()
+                ->enabled();
+        }
+
+        $planFeatures = $query
             ->latest()
             ->paginate(20);
 
@@ -55,7 +86,10 @@ class PlanFeatureController extends Controller
 
         return response()->json([
             'message' => 'Plan feature fetched successfully.',
-            'data' => $planFeature->load(['subscriptionPlan', 'feature']),
+            'data' => $planFeature->load([
+                'subscriptionPlan',
+                'feature',
+            ]),
         ]);
     }
 

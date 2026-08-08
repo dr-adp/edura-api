@@ -7,6 +7,7 @@ use App\Http\Requests\LoginRequest;
 use App\Http\Requests\RegisterRequest;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\AuditLogService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -14,6 +15,10 @@ use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
+    public function __construct(
+        private readonly AuditLogService $auditLogService
+    ) {}
+
     public function register(RegisterRequest $request): JsonResponse
     {
         $request->validated();
@@ -49,7 +54,7 @@ class AuthController extends Controller
 
         $user = User::with('role')->where('email', $request->email)->first();
 
-        if (!$user || !Hash::check($request->password, $user->password)) {
+        if (! $user || ! Hash::check($request->password, $user->password)) {
             throw ValidationException::withMessages([
                 'email' => ['Invalid email or password.'],
             ]);
@@ -62,6 +67,14 @@ class AuthController extends Controller
             ->delete();
 
         $token = $user->createToken('edura-api-token', ['*'])->plainTextToken;
+
+        $this->auditLogService->recordCustom(
+            action: 'login',
+            description: 'User logged in.',
+            user: $user,
+            request: $request,
+            module: 'Auth'
+        );
 
         return response()->json([
             'message' => 'Login successful.',
@@ -86,7 +99,17 @@ class AuthController extends Controller
 
     public function logout(Request $request): JsonResponse
     {
-        $request->user()->currentAccessToken()->delete();
+        $user = $request->user();
+
+        $this->auditLogService->recordCustom(
+            action: 'logout',
+            description: 'User logged out.',
+            user: $user,
+            request: $request,
+            module: 'Auth'
+        );
+
+        $user->currentAccessToken()->delete();
 
         return response()->json([
             'message' => 'Logout successful.',

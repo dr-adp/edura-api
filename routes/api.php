@@ -1,11 +1,12 @@
 <?php
 
+use App\Http\Controllers\Api\AICreditTransactionController;
 use App\Http\Controllers\Api\AssignmentController;
 use App\Http\Controllers\Api\AssignmentEvaluationController;
 use App\Http\Controllers\Api\AssignmentSubmissionController;
 use App\Http\Controllers\Api\AttendanceRecordController;
+use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
-use App\Http\Controllers\Api\AICreditTransactionController;
 use App\Http\Controllers\Api\BatchController;
 use App\Http\Controllers\Api\CertificateController;
 use App\Http\Controllers\Api\CertificateSettingController;
@@ -13,8 +14,8 @@ use App\Http\Controllers\Api\CourseController;
 use App\Http\Controllers\Api\CourseEnrollmentController;
 use App\Http\Controllers\Api\CourseSectionController;
 use App\Http\Controllers\Api\DepartmentController;
-use App\Http\Controllers\Api\GradebookController;
 use App\Http\Controllers\Api\FeatureController;
+use App\Http\Controllers\Api\GradebookController;
 use App\Http\Controllers\Api\InstitutionController;
 use App\Http\Controllers\Api\InstitutionSettingController;
 use App\Http\Controllers\Api\InstitutionSubscriptionController;
@@ -166,6 +167,14 @@ Route::middleware(['auth:sanctum'])->group(function () {
             'usage-statistics',
             UsageStatisticController::class
         );
+
+        Route::apiResource(
+            'audit-logs',
+            AuditLogController::class
+        )->only([
+            'index',
+            'show',
+        ]);
 
         Route::apiResource('departments', DepartmentController::class);
         Route::apiResource('batches', BatchController::class);

@@ -2,8 +2,7 @@
 
 namespace App\Support;
 
-use App\Models\ActivityLog;
-use Illuminate\Http\Request;
+use App\Services\AuditLogService;
 use Illuminate\Support\Facades\Auth;
 
 class ActivityLogger
@@ -15,20 +14,14 @@ class ActivityLogger
         $model = null,
         array $properties = []
     ): void {
-
-        $user = Auth::user();
-
-        ActivityLog::create([
-            'institution_id' => institutionId(),
-            'user_id' => $user?->id,
-            'module' => $module,
-            'action' => $action,
-            'description' => $description,
-            'ip_address' => request()->ip(),
-            'user_agent' => request()->userAgent(),
-            'model_type' => $model ? get_class($model) : null,
-            'model_id' => $model?->id,
-            'properties' => $properties,
-        ]);
+        app(AuditLogService::class)->recordCustom(
+            action: $action,
+            description: $description,
+            auditable: $model,
+            metadata: $properties,
+            user: Auth::user(),
+            request: app()->bound('request') ? request() : null,
+            module: $module
+        );
     }
 }

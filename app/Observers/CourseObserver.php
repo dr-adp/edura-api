@@ -3,20 +3,22 @@
 namespace App\Observers;
 
 use App\Models\Course;
-use App\Support\ActivityLogger;
+use App\Services\AuditLogService;
 
 class CourseObserver
 {
+    public function __construct(
+        private readonly AuditLogService $auditLogService
+    ) {}
+
     /**
      * Handle the Course "created" event.
      */
     public function created(Course $course): void
     {
-        ActivityLogger::log(
-            'Course',
-            'Created',
-            "Course '{$course->title}' created.",
-            $course
+        $this->auditLogService->recordCreated(
+            $course,
+            "Course '{$course->title}' created."
         );
     }
 
@@ -25,11 +27,9 @@ class CourseObserver
      */
     public function updated(Course $course): void
     {
-        ActivityLogger::log(
-            'Course',
-            'Updated',
-            "Course '{$course->title}' updated.",
-            $course
+        $this->auditLogService->recordUpdated(
+            $course,
+            "Course '{$course->title}' updated."
         );
     }
 
@@ -38,17 +38,18 @@ class CourseObserver
      */
     public function deleted(Course $course): void
     {
-        ActivityLogger::log(
-            'Course',
-            'Deleted',
-            "Course '{$course->title}' deleted.",
-            $course
+        $this->auditLogService->recordDeleted(
+            $course,
+            "Course '{$course->title}' deleted."
         );
     }
 
     public function restored(Course $course): void
     {
-        //
+        $this->auditLogService->recordRestored(
+            $course,
+            "Course '{$course->title}' restored."
+        );
     }
 
     public function forceDeleted(Course $course): void

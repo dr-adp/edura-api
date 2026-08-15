@@ -2,18 +2,27 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Models\Course;
-use Illuminate\Support\Str;
-use Illuminate\Http\JsonResponse;
+use App\Exceptions\DomainException;
 use App\Http\Controllers\Api\BaseApiController;
-use Illuminate\Support\Facades\Auth;
-use App\Models\User;
-use App\Models\InstitutionUser;
 use App\Http\Requests\StoreCourseRequest;
 use App\Http\Requests\UpdateCourseRequest;
+use App\Models\Course;
+use App\Models\InstitutionUser;
+use App\Models\User;
+use App\Services\SubscriptionService;
+use App\Services\UsageStatisticsService;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class CourseController extends BaseApiController
 {
+    public function __construct(
+        private readonly SubscriptionService $subscriptionService,
+        private readonly UsageStatisticsService $usageStatisticsService
+    ) {}
+
     public function index(): JsonResponse
     {
         /** @var User $user */
@@ -27,10 +36,10 @@ class CourseController extends BaseApiController
         ]);
 
         /*
-    |--------------------------------------------------------------------------
-    | Institution Admin
-    |--------------------------------------------------------------------------
-    */
+        |--------------------------------------------------------------------------
+        | Institution Admin
+        |--------------------------------------------------------------------------
+        */
         if ($user->hasRole('institution-admin')) {
 
             $institutionUser = InstitutionUser::where(
@@ -39,7 +48,6 @@ class CourseController extends BaseApiController
             )->first();
 
             if (!$institutionUser) {
-
                 abort(
                     403,
                     'Institution profile not found.'
@@ -53,15 +61,14 @@ class CourseController extends BaseApiController
         }
 
         /*
-    |--------------------------------------------------------------------------
-    | Teacher
-    |--------------------------------------------------------------------------
-    */ elseif ($user->hasRole('teacher')) {
+        |--------------------------------------------------------------------------
+        | Teacher
+        |--------------------------------------------------------------------------
+        */ elseif ($user->hasRole('teacher')) {
 
             $teacherProfile = $user->teacherProfile;
 
             if (!$teacherProfile) {
-
                 abort(
                     403,
                     'Teacher profile not found.'
@@ -75,10 +82,10 @@ class CourseController extends BaseApiController
         }
 
         /*
-    |--------------------------------------------------------------------------
-    | Super Admin
-    |--------------------------------------------------------------------------
-    */ elseif (!$user->hasRole('super-admin')) {
+        |--------------------------------------------------------------------------
+        | Super Admin
+        |--------------------------------------------------------------------------
+        */ elseif (!$user->hasRole('super-admin')) {
 
             abort(
                 403,
@@ -104,10 +111,10 @@ class CourseController extends BaseApiController
         $validated = $request->validated();
 
         /*
-    |--------------------------------------------------------------------------
-    | Institution Admin Restrictions
-    |--------------------------------------------------------------------------
-    */
+        |--------------------------------------------------------------------------
+        | Institution Admin Restrictions
+        |--------------------------------------------------------------------------
+        */
         if ($user->hasRole('institution-admin')) {
 
             $institutionUser = InstitutionUser::where(
@@ -116,10 +123,25 @@ class CourseController extends BaseApiController
             )->first();
 
             if (!$institutionUser) {
-
                 abort(
                     403,
                     'Institution profile not found.'
+                );
+            }
+
+            /*
+             * Do not silently switch the requested institution.
+             * An institution admin may only create courses
+             * for their own institution.
+             */
+            if (
+                isset($validated['institution_id']) &&
+                (int) $validated['institution_id'] !==
+                (int) $institutionUser->institution_id
+            ) {
+                abort(
+                    403,
+                    'Unauthorized institution access.'
                 );
             }
 
@@ -128,16 +150,15 @@ class CourseController extends BaseApiController
         }
 
         /*
-    |--------------------------------------------------------------------------
-    | Teacher Restrictions
-    |--------------------------------------------------------------------------
-    */
+        |--------------------------------------------------------------------------
+        | Teacher Restrictions
+        |--------------------------------------------------------------------------
+        */
         if ($user->hasRole('teacher')) {
 
             $teacherProfile = $user->teacherProfile;
 
             if (!$teacherProfile) {
-
                 abort(
                     403,
                     'Teacher profile not found.'
@@ -152,24 +173,105 @@ class CourseController extends BaseApiController
         }
 
         /*
-    |--------------------------------------------------------------------------
-    | Authorization Check
-    |--------------------------------------------------------------------------
-    */
+        |--------------------------------------------------------------------------
+        | Authorization Check
+        |--------------------------------------------------------------------------
+        */
         $this->authorize('create', Course::class);
 
         /*
-    |--------------------------------------------------------------------------
-    | Slug Generation
-    |--------------------------------------------------------------------------
-    */
+        |--------------------------------------------------------------------------
+        | Course Status
+        |--------------------------------------------------------------------------
+        |
+        | The database default is draft, so explicitly resolving the
+        | effective status here keeps subscription-limit logic clear.
+        |
+        */
+        $status = $validated['status'] ?? 'draft';
+
+        /*
+        |--------------------------------------------------------------------------
+        | Subscription Requirement
+        |--------------------------------------------------------------------------
+        |
+        | Archived courses are not billable and therefore do not require
+        | a current subscription.
+        |
+        | Draft and published courses consume course capacity and require
+        | a current subscription.
+        |
+        */
+        $subscription = null;
+
+        if (in_array($status, ['draft', 'published'], true)) {
+
+            $subscription = $this->subscriptionService
+                ->currentForInstitution(
+                    (int) $validated['institution_id']
+                );
+
+            if ($subscription === null) {
+                throw new DomainException(
+                    'No active subscription found for this institution.'
+                );
+            }
+        }
+
+        /*
+        |--------------------------------------------------------------------------
+        | Slug Generation
+        |--------------------------------------------------------------------------
+        */
         $validated['slug'] =
             Str::slug($validated['title'])
             . '-' . time();
 
-        $course = Course::create(
-            $validated
-        );
+        /*
+        |--------------------------------------------------------------------------
+        | Course Creation + Usage Accounting
+        |--------------------------------------------------------------------------
+        |
+        | The usage increment and course creation are part of the same
+        | transaction. If either operation fails, both are rolled back.
+        |
+        */
+        $course = DB::transaction(function () use (
+            $validated,
+            $status
+        ) {
+            if (in_array($status, ['draft', 'published'], true)) {
+
+                $this->usageStatisticsService->increment(
+                    institution: (int) $validated['institution_id'],
+                    metric: 'courses',
+                    amount: 1
+                );
+            } else {
+                /*
+         * Archived courses are not billable.
+         *
+         * If the institution has a current subscription,
+         * maintain a zero usage record for the course metric.
+         *
+         * If there is no subscription, do not create a
+         * usage record at all.
+         */
+                $subscription = $this->subscriptionService
+                    ->currentForInstitution(
+                        (int) $validated['institution_id']
+                    );
+
+                if ($subscription !== null) {
+                    $this->usageStatisticsService->ensure(
+                        institution: (int) $validated['institution_id'],
+                        metric: 'courses'
+                    );
+                }
+            }
+
+            return Course::create($validated);
+        });
 
         return $this->successResponse(
             $course->load([
@@ -198,8 +300,10 @@ class CourseController extends BaseApiController
         );
     }
 
-    public function update(UpdateCourseRequest $request, Course $course): JsonResponse
-    {
+    public function update(
+        UpdateCourseRequest $request,
+        Course $course
+    ): JsonResponse {
         /*
     |--------------------------------------------------------------------------
     | Existing Course Authorization
@@ -225,7 +329,6 @@ class CourseController extends BaseApiController
             )->first();
 
             if (!$institutionUser) {
-
                 abort(
                     403,
                     'Institution profile not found.'
@@ -246,7 +349,6 @@ class CourseController extends BaseApiController
             $teacherProfile = $user->teacherProfile;
 
             if (!$teacherProfile) {
-
                 abort(
                     403,
                     'Teacher profile not found.'
@@ -254,14 +356,14 @@ class CourseController extends BaseApiController
             }
 
             /*
-        | Prevent ownership transfer
-        */
+         * Prevent ownership transfer.
+         */
             $validated['teacher_profile_id'] =
                 $teacherProfile->id;
 
             /*
-        | Prevent institution switching
-        */
+         * Prevent institution switching.
+         */
             $validated['institution_id'] =
                 $teacherProfile->institution_id;
         }
@@ -281,6 +383,75 @@ class CourseController extends BaseApiController
 
         /*
     |--------------------------------------------------------------------------
+    | Course Status Lifecycle
+    |--------------------------------------------------------------------------
+    |
+    | Billable statuses:
+    | - draft
+    | - published
+    |
+    | Non-billable status:
+    | - archived
+    |
+    */
+        $oldStatus = $course->status;
+        $newStatus = $validated['status'] ?? $oldStatus;
+
+        $wasBillable = in_array(
+            $oldStatus,
+            ['draft', 'published'],
+            true
+        );
+
+        $willBeBillable = in_array(
+            $newStatus,
+            ['draft', 'published'],
+            true
+        );
+
+        $statusChanged = $oldStatus !== $newStatus;
+
+        /*
+    |--------------------------------------------------------------------------
+    | Subscription Requirement
+    |--------------------------------------------------------------------------
+    |
+    | Only archived -> draft/published requires a new subscription
+    | capacity check.
+    |
+    */
+        if (
+            $statusChanged &&
+            !$wasBillable &&
+            $willBeBillable
+        ) {
+            /*
+     * Maintain a zero usage record before attempting
+     * to restore an archived course.
+     *
+     * This also gives us a consistent usage state when
+     * the transition is rejected because there is no
+     * active subscription.
+     */
+            $this->usageStatisticsService->ensure(
+                institution: (int) $course->institution_id,
+                metric: 'courses'
+            );
+
+            $subscription = $this->subscriptionService
+                ->currentForInstitution(
+                    (int) $course->institution_id
+                );
+
+            if ($subscription === null) {
+                throw new DomainException(
+                    'No active subscription found for this institution.'
+                );
+            }
+        }
+
+        /*
+    |--------------------------------------------------------------------------
     | Slug Update
     |--------------------------------------------------------------------------
     */
@@ -291,19 +462,69 @@ class CourseController extends BaseApiController
                 . '-' . time();
         }
 
-        $course->update(
-            $validated
-        );
+        /*
+    |--------------------------------------------------------------------------
+    | Course Update + Usage Accounting
+    |--------------------------------------------------------------------------
+    |
+    | Usage changes and course update happen inside one transaction.
+    |
+    */
+        $course = DB::transaction(function () use (
+            $course,
+            $validated,
+            $statusChanged,
+            $wasBillable,
+            $willBeBillable
+        ) {
+            /*
+         * Billable -> Archived
+         *
+         * draft -> archived
+         * published -> archived
+         */
+            if (
+                $statusChanged &&
+                $wasBillable &&
+                !$willBeBillable
+            ) {
+                $this->usageStatisticsService->decrement(
+                    institution: (int) $course->institution_id,
+                    metric: 'courses',
+                    amount: 1
+                );
+            }
+
+            /*
+         * Archived -> Billable
+         *
+         * archived -> draft
+         * archived -> published
+         */
+            if (
+                $statusChanged &&
+                !$wasBillable &&
+                $willBeBillable
+            ) {
+                $this->usageStatisticsService->increment(
+                    institution: (int) $course->institution_id,
+                    metric: 'courses',
+                    amount: 1
+                );
+            }
+
+            $course->update($validated);
+
+            return $course->fresh();
+        });
 
         return $this->successResponse(
-            $course
-                ->fresh()
-                ->load([
-                    'institution',
-                    'department',
-                    'batch',
-                    'teacherProfile.user'
-                ]),
+            $course->load([
+                'institution',
+                'department',
+                'batch',
+                'teacherProfile.user'
+            ]),
             'Course updated successfully.'
         );
     }
@@ -311,10 +532,10 @@ class CourseController extends BaseApiController
     public function destroy(Course $course): JsonResponse
     {
         /*
-    |--------------------------------------------------------------------------
-    | Authorization
-    |--------------------------------------------------------------------------
-    */
+        |--------------------------------------------------------------------------
+        | Authorization
+        |--------------------------------------------------------------------------
+        */
         $this->authorize('delete', $course);
 
         $course->delete();
@@ -334,19 +555,19 @@ class CourseController extends BaseApiController
         $user = Auth::user();
 
         /*
-    |--------------------------------------------------------------------------
-    | Super Admin
-    |--------------------------------------------------------------------------
-    */
+        |--------------------------------------------------------------------------
+        | Super Admin
+        |--------------------------------------------------------------------------
+        */
         if ($user->hasRole('super-admin')) {
             return;
         }
 
         /*
-    |--------------------------------------------------------------------------
-    | Institution Admin
-    |--------------------------------------------------------------------------
-    */
+        |--------------------------------------------------------------------------
+        | Institution Admin
+        |--------------------------------------------------------------------------
+        */
         if ($user->hasRole('institution-admin')) {
 
             $institutionUser = InstitutionUser::where(
@@ -355,7 +576,6 @@ class CourseController extends BaseApiController
             )->first();
 
             if (!$institutionUser) {
-
                 abort(
                     403,
                     'Institution profile not found.'
@@ -368,10 +588,9 @@ class CourseController extends BaseApiController
 
             if (
                 !$targetInstitutionId ||
-                (int)$targetInstitutionId !==
-                (int)$institutionUser->institution_id
+                (int) $targetInstitutionId !==
+                (int) $institutionUser->institution_id
             ) {
-
                 abort(
                     403,
                     'Unauthorized institution access.'
@@ -382,16 +601,15 @@ class CourseController extends BaseApiController
         }
 
         /*
-    |--------------------------------------------------------------------------
-    | Teacher
-    |--------------------------------------------------------------------------
-    */
+        |--------------------------------------------------------------------------
+        | Teacher
+        |--------------------------------------------------------------------------
+        */
         if ($user->hasRole('teacher')) {
 
             $teacherProfile = $user->teacherProfile;
 
             if (!$teacherProfile) {
-
                 abort(
                     403,
                     'Teacher profile not found.'
@@ -401,10 +619,9 @@ class CourseController extends BaseApiController
             if ($course) {
 
                 if (
-                    (int)$course->teacher_profile_id !==
-                    (int)$teacherProfile->id
+                    (int) $course->teacher_profile_id !==
+                    (int) $teacherProfile->id
                 ) {
-
                     abort(
                         403,
                         'Unauthorized course access.'
@@ -416,10 +633,9 @@ class CourseController extends BaseApiController
 
             if (
                 $teacherProfileId &&
-                (int)$teacherProfileId !==
-                (int)$teacherProfile->id
+                (int) $teacherProfileId !==
+                (int) $teacherProfile->id
             ) {
-
                 abort(
                     403,
                     'You can only manage your own courses.'

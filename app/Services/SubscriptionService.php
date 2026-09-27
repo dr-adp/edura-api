@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Exceptions\DomainException;
+use App\Models\AICreditTransaction;
 use App\Models\Institution;
 use App\Models\Subscription;
 use App\Models\SubscriptionPlan;
@@ -13,8 +14,43 @@ use Illuminate\Support\Str;
 class SubscriptionService
 {
     public function __construct(
-        private readonly AuditLogService $auditLogService
+        private readonly AuditLogService $auditLogService,
+        private readonly AICreditService $aiCreditService
     ) {}
+
+    private function grantIncludedAICreditsIfNeeded(
+        Subscription $subscription
+    ): void {
+        $alreadyGranted = AICreditTransaction::query()
+            ->forInstitution((int) $subscription->institution_id)
+            ->where('subscription_id', $subscription->id)
+            ->where('transaction_type', 'grant')
+            ->where('source', 'subscription_included')
+            ->exists();
+
+        if ($alreadyGranted) {
+            return;
+        }
+
+        $subscription->loadMissing('subscriptionPlan');
+
+        $credits = (float) (
+            $subscription->subscriptionPlan?->included_ai_credits ?? 0
+        );
+
+        if ($credits <= 0) {
+            return;
+        }
+
+        $this->aiCreditService->grant([
+            'institution_id' => $subscription->institution_id,
+            'subscription_id' => $subscription->id,
+            'credits' => $credits,
+            'source' => 'subscription_included',
+            'description' => 'Included AI credits for subscription.',
+            'created_by_id' => auth()->id(),
+        ]);
+    }
 
     public function create(array $data): Subscription
     {
@@ -66,6 +102,10 @@ class SubscriptionService
                     'billing_cycle' => $subscription->billing_cycle,
                 ]
             );
+
+            if ($subscription->status === Subscription::STATUS_ACTIVE) {
+                $this->grantIncludedAICreditsIfNeeded($subscription);
+            }
 
             return $subscription;
         });
@@ -120,6 +160,13 @@ class SubscriptionService
                 newValues: $subscription->getAttributes()
             );
 
+            if (
+                $currentStatus !== Subscription::STATUS_ACTIVE &&
+                $subscription->status === Subscription::STATUS_ACTIVE
+            ) {
+                $this->grantIncludedAICreditsIfNeeded($subscription);
+            }
+
             return $subscription;
         });
     }
@@ -171,6 +218,8 @@ class SubscriptionService
                     'subscription_plan_id' => $subscription->subscription_plan_id,
                 ]
             );
+
+            $this->grantIncludedAICreditsIfNeeded($subscription);
 
             return $subscription;
         });

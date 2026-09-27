@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Saas;
 
+use App\Models\AICreditTransaction;
 use App\Models\Feature;
 use App\Models\Institution;
 use App\Models\InstitutionSetting;
@@ -11,6 +12,7 @@ use App\Models\Role;
 use App\Models\Subscription;
 use App\Models\SubscriptionPlan;
 use App\Models\User;
+use App\Services\AICreditService;
 use App\Services\FeatureService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
@@ -20,6 +22,219 @@ use Tests\TestCase;
 class Sprint1SaasDomainTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_repeated_subscription_activation_does_not_duplicate_included_ai_credits(): void
+    {
+        $superAdmin = $this->createUserWithRole('super-admin');
+        $institution = $this->createInstitution('AI-IDEMPOTENT');
+        $plan = $this->createPlan('AI-IDEMPOTENT-PLAN');
+
+        $this->actingAs($superAdmin, 'web');
+
+        $response = $this->postJson('/api/subscriptions', [
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => 'active',
+            'starts_at' => now()->toDateTimeString(),
+        ]);
+
+        $response->assertCreated();
+
+        $subscriptionId = $response->json('data.id');
+
+        $this->postJson(
+            "/api/subscriptions/{$subscriptionId}/activate"
+        )->assertOk();
+
+        $this->assertDatabaseCount('ai_credit_transactions', 1);
+
+        $this->assertSame(
+            100.0,
+            (float) app(AICreditService::class)
+                ->balance($institution)
+        );
+
+        $grant = AICreditTransaction::query()
+            ->where('subscription_id', $subscriptionId)
+            ->where('source', 'subscription_included')
+            ->sole();
+
+        $this->assertDatabaseHas('activity_logs', [
+            'institution_id' => $institution->id,
+            'user_id' => $superAdmin->id,
+            'module' => 'AICredit',
+            'action' => 'ai_credits_granted',
+            'auditable_type' => AICreditTransaction::class,
+            'auditable_id' => $grant->id,
+        ]);
+
+        $this->postJson("/api/subscriptions/{$subscriptionId}/suspend")
+            ->assertOk();
+        $this->postJson("/api/subscriptions/{$subscriptionId}/cancel")
+            ->assertOk();
+
+        $this->assertDatabaseHas('ai_credit_transactions', [
+            'id' => $grant->id,
+            'subscription_id' => $subscriptionId,
+            'source' => 'subscription_included',
+        ]);
+    }
+
+    public function test_trial_subscription_does_not_receive_included_ai_credits_until_activation(): void
+    {
+        $superAdmin = $this->createUserWithRole('super-admin');
+        $institution = $this->createInstitution('AI-TRIAL');
+        $plan = $this->createPlan('AI-TRIAL-PLAN');
+
+        $this->actingAs($superAdmin, 'web');
+
+        $response = $this->postJson('/api/subscriptions', [
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => 'trial',
+            'starts_at' => now()->toDateTimeString(),
+        ]);
+
+        $response->assertCreated()
+            ->assertJsonPath('data.status', 'trial');
+
+        $subscriptionId = $response->json('data.id');
+
+        $this->assertDatabaseMissing('ai_credit_transactions', [
+            'subscription_id' => $subscriptionId,
+            'source' => 'subscription_included',
+        ]);
+
+        $this->assertSame(
+            0.0,
+            (float) app(AICreditService::class)
+                ->balance($institution)
+        );
+
+        $this->postJson(
+            "/api/subscriptions/{$subscriptionId}/activate"
+        )->assertOk();
+
+        $this->assertDatabaseHas('ai_credit_transactions', [
+            'institution_id' => $institution->id,
+            'subscription_id' => $subscriptionId,
+            'transaction_type' => 'grant',
+            'credits' => 100,
+            'source' => 'subscription_included',
+        ]);
+
+        $this->assertSame(
+            100.0,
+            (float) app(AICreditService::class)
+                ->balance($institution)
+        );
+    }
+
+    public function test_updating_trial_subscription_to_active_grants_included_ai_credits(): void
+    {
+        $superAdmin = $this->createUserWithRole('super-admin');
+        $institution = $this->createInstitution('AI-UPDATE-ACTIVATION');
+        $plan = $this->createPlan('AI-UPDATE-ACTIVATION-PLAN');
+
+        $this->actingAs($superAdmin, 'web');
+
+        $subscriptionId = $this->postJson('/api/subscriptions', [
+            'institution_id' => $institution->id,
+            'subscription_plan_id' => $plan->id,
+            'status' => 'trial',
+            'starts_at' => now()->toDateTimeString(),
+        ])->assertCreated()->json('data.id');
+
+        $this->putJson("/api/subscriptions/{$subscriptionId}", [
+            'status' => 'active',
+        ])->assertOk()->assertJsonPath('data.status', 'active');
+
+        $this->assertDatabaseHas('ai_credit_transactions', [
+            'institution_id' => $institution->id,
+            'subscription_id' => $subscriptionId,
+            'transaction_type' => 'grant',
+            'credits' => 100,
+            'source' => 'subscription_included',
+        ]);
+    }
+
+    public function test_included_ai_credits_preserve_balance_and_are_granted_per_subscription(): void
+    {
+        $superAdmin = $this->createUserWithRole('super-admin');
+        $institution = $this->createInstitution('AI-BALANCE-PRESERVE');
+        $plan = $this->createPlan('AI-BALANCE-PRESERVE-PLAN');
+
+        $this->actingAs($superAdmin, 'web');
+
+        app(AICreditService::class)->grant([
+            'institution_id' => $institution->id,
+            'credits' => 25,
+            'source' => 'manual',
+        ]);
+
+        $subscriptionIds = [];
+
+        for ($index = 0; $index < 2; $index++) {
+            $subscriptionIds[] = $this->postJson('/api/subscriptions', [
+                'institution_id' => $institution->id,
+                'subscription_plan_id' => $plan->id,
+                'status' => 'active',
+                'starts_at' => now()->toDateTimeString(),
+            ])->assertCreated()->json('data.id');
+        }
+
+        $this->assertSame(
+            225.0,
+            (float) app(AICreditService::class)->balance($institution)
+        );
+        $this->assertSame(3, AICreditTransaction::query()
+            ->where('institution_id', $institution->id)
+            ->count());
+
+        foreach ($subscriptionIds as $subscriptionId) {
+            $this->assertDatabaseHas('ai_credit_transactions', [
+                'institution_id' => $institution->id,
+                'subscription_id' => $subscriptionId,
+                'transaction_type' => 'grant',
+                'credits' => 100,
+                'source' => 'subscription_included',
+            ]);
+        }
+    }
+
+    public function test_zero_or_negative_plan_credits_do_not_create_included_grants(): void
+    {
+        $superAdmin = $this->createUserWithRole('super-admin');
+        $institution = $this->createInstitution('AI-NO-CREDITS');
+        $zeroPlan = $this->createPlan('AI-ZERO-PLAN');
+        $negativePlan = $this->createPlan('AI-NEGATIVE-PLAN');
+        $zeroPlan->update(['included_ai_credits' => 0]);
+        $negativePlan->update(['included_ai_credits' => -10]);
+
+        $this->actingAs($superAdmin, 'web');
+
+        foreach ([$zeroPlan, $negativePlan] as $plan) {
+            $subscriptionId = $this->postJson('/api/subscriptions', [
+                'institution_id' => $institution->id,
+                'subscription_plan_id' => $plan->id,
+                'status' => 'active',
+                'starts_at' => now()->toDateTimeString(),
+            ])->assertCreated()->json('data.id');
+
+            $this->assertDatabaseMissing('ai_credit_transactions', [
+                'subscription_id' => $subscriptionId,
+                'source' => 'subscription_included',
+            ]);
+        }
+
+        $this->assertSame(0, AICreditTransaction::query()
+            ->where('institution_id', $institution->id)
+            ->count());
+        $this->assertSame(
+            0.0,
+            (float) app(AICreditService::class)->balance($institution)
+        );
+    }
 
     public function test_super_admin_creates_subscription_and_feature_service_resolves_plan_feature(): void
     {
@@ -57,6 +272,20 @@ class Sprint1SaasDomainTest extends TestCase
             'subscription_plan_id' => $plan->id,
             'status' => 'active',
         ]);
+
+        $this->assertDatabaseHas('ai_credit_transactions', [
+            'institution_id' => $institution->id,
+            'subscription_id' => $subscriptionId,
+            'transaction_type' => 'grant',
+            'credits' => 100,
+            'source' => 'subscription_included',
+        ]);
+
+        $this->assertSame(
+            100.0,
+            (float) app(AICreditService::class)
+                ->balance($institution)
+        );
 
         $this->assertTrue(
             app(FeatureService::class)->enabled($institution, 'ai_reports')

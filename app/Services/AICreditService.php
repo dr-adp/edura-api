@@ -5,6 +5,8 @@ namespace App\Services;
 use App\Exceptions\DomainException;
 use App\Models\AICreditTransaction;
 use App\Models\Institution;
+use App\Models\Subscription;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 
 class AICreditService
@@ -36,6 +38,120 @@ class AICreditService
         ]));
     }
 
+    public function grantIncludedForSubscription(
+        Subscription $subscription,
+        array $data = []
+    ): ?AICreditTransaction {
+        $subscriptionId = (int) $subscription->getKey();
+
+        try {
+            return DB::transaction(function () use (
+                $subscriptionId,
+                $subscription,
+                $data
+            ): ?AICreditTransaction {
+                $institution = Institution::query()
+                    ->whereKey($subscription->institution_id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+
+                $subscription = Subscription::query()
+                    ->lockForUpdate()
+                    ->findOrFail($subscriptionId);
+
+                if ((int) $subscription->institution_id !== $institution->id) {
+                    throw new DomainException(
+                        'The grant institution must match the subscription institution.'
+                    );
+                }
+
+                if (
+                    isset($data['institution_id']) &&
+                    (int) $data['institution_id'] !== (int) $subscription->institution_id
+                ) {
+                    throw new DomainException(
+                        'The grant institution must match the subscription institution.'
+                    );
+                }
+
+                $existing = $this->findSubscriptionIncludedGrant($subscription);
+
+                if ($existing !== null) {
+                    $claimExists = DB::table('subscription_ai_credit_grants')
+                        ->where('subscription_id', $subscriptionId)
+                        ->exists();
+
+                    if (!$claimExists) {
+                        DB::table('subscription_ai_credit_grants')->insert([
+                            'subscription_id' => $subscriptionId,
+                        ]);
+                    }
+
+                    return $existing->load([
+                        'institution',
+                        'subscription',
+                        'createdBy',
+                    ]);
+                }
+
+                if (!$subscription->isActive()) {
+                    throw new DomainException(
+                        'Subscription-included credits can only be granted to an active subscription.'
+                    );
+                }
+
+                $subscription->loadMissing('subscriptionPlan');
+                $credits = (float) (
+                    $subscription->subscriptionPlan?->included_ai_credits ?? 0
+                );
+
+                if ($credits <= 0) {
+                    return null;
+                }
+
+                if (
+                    isset($data['credits']) &&
+                    number_format((float) $data['credits'], 4, '.', '') !==
+                        number_format($credits, 4, '.', '')
+                ) {
+                    throw new DomainException(
+                        'Subscription-included grants must match the plan credit amount.'
+                    );
+                }
+
+                DB::table('subscription_ai_credit_grants')->insert([
+                    'subscription_id' => $subscriptionId,
+                ]);
+
+                return $this->recordLedgerTransaction(array_merge(
+                    [
+                        'description' => 'Included AI credits for subscription.',
+                    ],
+                    $data,
+                    [
+                        'institution_id' => $subscription->institution_id,
+                        'subscription_id' => $subscriptionId,
+                        'transaction_type' => 'grant',
+                        'credits' => $credits,
+                        'source' => 'subscription_included',
+                    ]
+                ));
+            });
+        } catch (UniqueConstraintViolationException $exception) {
+            $existing = $this->findSubscriptionIncludedGrant($subscription);
+
+            if ($existing !== null) {
+                return $existing->load([
+                    'institution',
+                    'subscription',
+                    'createdBy',
+                ]);
+            }
+
+            throw $exception;
+        }
+    }
+
     public function consume(array $data): AICreditTransaction
     {
         return $this->record(array_merge($data, [
@@ -51,6 +167,39 @@ class AICreditService
     }
 
     public function record(array $data): AICreditTransaction
+    {
+        if (
+            ($data['transaction_type'] ?? null) === 'grant' &&
+            strtolower(trim((string) ($data['source'] ?? ''))) ===
+                'subscription_included'
+        ) {
+            $subscriptionId = (int) ($data['subscription_id'] ?? 0);
+            $subscription = Subscription::query()->find($subscriptionId);
+
+            if ($subscription === null) {
+                throw new DomainException(
+                    'Subscription-included grants require a valid subscription.'
+                );
+            }
+
+            $transaction = $this->grantIncludedForSubscription(
+                $subscription,
+                $data
+            );
+
+            if ($transaction === null) {
+                throw new DomainException(
+                    'The subscription plan does not include positive AI credits.'
+                );
+            }
+
+            return $transaction;
+        }
+
+        return $this->recordLedgerTransaction($data);
+    }
+
+    private function recordLedgerTransaction(array $data): AICreditTransaction
     {
         return DB::transaction(function () use ($data) {
             $institutionId = (int) $data['institution_id'];
@@ -135,5 +284,18 @@ class AICreditService
             'adjustment' => $credits,
             default => abs($credits),
         };
+    }
+
+    private function findSubscriptionIncludedGrant(
+        Subscription $subscription
+    ): ?AICreditTransaction {
+        return AICreditTransaction::query()
+            ->forInstitution((int) $subscription->institution_id)
+            ->where('subscription_id', $subscription->id)
+            ->where('transaction_type', 'grant')
+            ->where('source', 'subscription_included')
+            ->oldest('id')
+            ->lockForUpdate()
+            ->first();
     }
 }

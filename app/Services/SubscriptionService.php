@@ -3,7 +3,6 @@
 namespace App\Services;
 
 use App\Exceptions\DomainException;
-use App\Models\AICreditTransaction;
 use App\Models\Institution;
 use App\Models\Subscription;
 use App\Models\SubscriptionPlan;
@@ -21,35 +20,12 @@ class SubscriptionService
     private function grantIncludedAICreditsIfNeeded(
         Subscription $subscription
     ): void {
-        $alreadyGranted = AICreditTransaction::query()
-            ->forInstitution((int) $subscription->institution_id)
-            ->where('subscription_id', $subscription->id)
-            ->where('transaction_type', 'grant')
-            ->where('source', 'subscription_included')
-            ->exists();
-
-        if ($alreadyGranted) {
-            return;
-        }
-
-        $subscription->loadMissing('subscriptionPlan');
-
-        $credits = (float) (
-            $subscription->subscriptionPlan?->included_ai_credits ?? 0
+        $this->aiCreditService->grantIncludedForSubscription(
+            $subscription,
+            [
+                'created_by_id' => auth()->id(),
+            ]
         );
-
-        if ($credits <= 0) {
-            return;
-        }
-
-        $this->aiCreditService->grant([
-            'institution_id' => $subscription->institution_id,
-            'subscription_id' => $subscription->id,
-            'credits' => $credits,
-            'source' => 'subscription_included',
-            'description' => 'Included AI credits for subscription.',
-            'created_by_id' => auth()->id(),
-        ]);
     }
 
     public function create(array $data): Subscription

@@ -277,31 +277,106 @@ class SubscriptionService
                 (int) $subscription->institution_id
             );
 
+            $lockedSubscription = Subscription::query()
+                ->whereKey($subscription->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
             $this->ensureValidTransition(
-                $subscription->status,
+                $lockedSubscription->status,
                 Subscription::STATUS_EXPIRED
             );
 
-            $subscription->update([
-                'status' => Subscription::STATUS_EXPIRED,
-                'expires_at' => now(),
-            ]);
+            return $this->markExpired(
+                $lockedSubscription,
+                $institution
+            );
+        });
+    }
 
-            $subscription = $subscription->fresh()->load([
-                'institution',
-                'subscriptionPlan',
-            ]);
-
-            $this->auditLogService->recordCustom(
-                action: 'subscription_expired',
-                description: 'Subscription expired.',
-                auditable: $subscription,
-                institutionId: $institution->id,
-                module: 'Subscription'
+    /**
+     * Expire a subscription only if it is still eligible.
+     *
+     * Returns null when the subscription is no longer eligible.
+     */
+    public function expireIfEligible(
+        Subscription $subscription,
+        int $gracePeriodDays
+    ): ?Subscription {
+        return DB::transaction(function () use (
+            $subscription,
+            $gracePeriodDays
+        ) {
+            // Follow the existing institution-first locking convention.
+            $institution = $this->lockInstitution(
+                (int) $subscription->institution_id
             );
 
-            return $subscription;
+            // Always use the latest database state, not the stale model
+            // selected earlier by the scheduled command.
+            $lockedSubscription = Subscription::query()
+                ->whereKey($subscription->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $now = now();
+            $gracePeriodDays = max(0, $gracePeriodDays);
+
+            $trialEligible =
+                $lockedSubscription->status === Subscription::STATUS_TRIAL
+                && $lockedSubscription->trial_ends_at !== null
+                && $lockedSubscription->trial_ends_at->lte($now);
+
+            $activeEligible =
+                $lockedSubscription->status === Subscription::STATUS_ACTIVE
+                && $lockedSubscription->current_period_ends_at !== null
+                && $lockedSubscription->current_period_ends_at->lte(
+                    $now->copy()->subDays($gracePeriodDays)
+                );
+
+            if (! $trialEligible && ! $activeEligible) {
+                return null;
+            }
+
+            $this->ensureValidTransition(
+                $lockedSubscription->status,
+                Subscription::STATUS_EXPIRED
+            );
+
+            return $this->markExpired(
+                $lockedSubscription,
+                $institution
+            );
         });
+    }
+
+    /**
+     * Persist an expiry and record its audit event.
+     * The caller must already hold the institution lock.
+     */
+    private function markExpired(
+        Subscription $subscription,
+        Institution $institution
+    ): Subscription {
+        $subscription->update([
+            'status' => Subscription::STATUS_EXPIRED,
+            'expires_at' => now(),
+        ]);
+
+        $subscription = $subscription->fresh()->load([
+            'institution',
+            'subscriptionPlan',
+        ]);
+
+        $this->auditLogService->recordCustom(
+            action: 'subscription_expired',
+            description: 'Subscription expired.',
+            auditable: $subscription,
+            institutionId: $institution->id,
+            module: 'Subscription'
+        );
+
+        return $subscription;
     }
 
     public function delete(Subscription $subscription): bool

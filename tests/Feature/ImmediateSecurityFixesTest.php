@@ -27,6 +27,31 @@ class ImmediateSecurityFixesTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_parent_user_can_have_multiple_parent_profiles(): void
+    {
+        $institution = $this->createInstitution('PARENT-MULTI');
+
+        [, $firstStudent] = $this->createStudent($institution);
+        [, $secondStudent] = $this->createStudent($institution);
+
+        $parentUser = $this->createParent($institution, $firstStudent);
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $secondStudent->id,
+            'status' => 'active',
+        ]);
+
+        $parentProfiles = $parentUser->parentProfiles;
+
+        $this->assertCount(2, $parentProfiles);
+        $this->assertEqualsCanonicalizing(
+            [$firstStudent->id, $secondStudent->id],
+            $parentProfiles->pluck('student_profile_id')->all()
+        );
+    }
+
     public function test_certificate_access_is_scoped_for_every_restricted_role(): void
     {
         $firstInstitution = $this->createInstitution('CERT-A');
@@ -52,7 +77,7 @@ class ImmediateSecurityFixesTest extends TestCase
             ->assertJsonCount(1, 'data.data')
             ->assertJsonPath('data.data.0.id', $firstCertificate->id);
         $this->assertForbiddenResponse(
-            $this->getJson('/api/certificates/'.$secondCertificate->id),
+            $this->getJson('/api/certificates/' . $secondCertificate->id),
             'student reading another certificate'
         );
 
@@ -62,7 +87,7 @@ class ImmediateSecurityFixesTest extends TestCase
             ->assertJsonCount(1, 'data.data')
             ->assertJsonPath('data.data.0.id', $firstCertificate->id);
         $this->assertForbiddenResponse(
-            $this->patchJson('/api/certificates/'.$firstCertificate->id, [
+            $this->patchJson('/api/certificates/' . $firstCertificate->id, [
                 'status' => 'revoked',
             ]),
             'parent updating a certificate'
@@ -74,7 +99,7 @@ class ImmediateSecurityFixesTest extends TestCase
             ->assertJsonCount(1, 'data.data')
             ->assertJsonPath('data.data.0.id', $firstCertificate->id);
         $this->assertForbiddenResponse(
-            $this->getJson('/api/certificates/'.$secondCertificate->id),
+            $this->getJson('/api/certificates/' . $secondCertificate->id),
             'teacher reading another course certificate'
         );
 
@@ -84,7 +109,7 @@ class ImmediateSecurityFixesTest extends TestCase
             ->assertJsonCount(1, 'data.data')
             ->assertJsonPath('data.data.0.id', $firstCertificate->id);
         $this->assertForbiddenResponse(
-            $this->getJson('/api/certificates/'.$secondCertificate->id),
+            $this->getJson('/api/certificates/' . $secondCertificate->id),
             'institution admin reading another institution certificate'
         );
     }
@@ -113,20 +138,20 @@ class ImmediateSecurityFixesTest extends TestCase
             ->assertOk()
             ->assertJsonCount(1, 'data.data')
             ->assertJsonPath('data.data.0.id', $firstProgress->id);
-        $this->patchJson('/api/lesson-progress/'.$firstProgress->id, [
+        $this->patchJson('/api/lesson-progress/' . $firstProgress->id, [
             'status' => 'completed',
         ])->assertOk();
         $this->assertForbiddenResponse(
-            $this->patchJson('/api/lesson-progress/'.$secondProgress->id, [
+            $this->patchJson('/api/lesson-progress/' . $secondProgress->id, [
                 'status' => 'completed',
             ]),
             'student updating another student progress'
         );
 
         $this->authenticate($parentUser);
-        $this->getJson('/api/lesson-progress/'.$firstProgress->id)->assertOk();
+        $this->getJson('/api/lesson-progress/' . $firstProgress->id)->assertOk();
         $this->assertForbiddenResponse(
-            $this->patchJson('/api/lesson-progress/'.$firstProgress->id, [
+            $this->patchJson('/api/lesson-progress/' . $firstProgress->id, [
                 'status' => 'in_progress',
             ]),
             'parent updating child progress'
@@ -137,7 +162,7 @@ class ImmediateSecurityFixesTest extends TestCase
             ->assertOk()
             ->assertJsonCount(1, 'data.data');
         $this->assertForbiddenResponse(
-            $this->getJson('/api/lesson-progress/'.$secondProgress->id),
+            $this->getJson('/api/lesson-progress/' . $secondProgress->id),
             'teacher reading another course progress'
         );
 
@@ -146,7 +171,7 @@ class ImmediateSecurityFixesTest extends TestCase
             ->assertOk()
             ->assertJsonCount(1, 'data.data');
         $this->assertForbiddenResponse(
-            $this->getJson('/api/lesson-progress/'.$secondProgress->id),
+            $this->getJson('/api/lesson-progress/' . $secondProgress->id),
             'institution admin reading another institution progress'
         );
     }
@@ -210,9 +235,9 @@ class ImmediateSecurityFixesTest extends TestCase
             ->json('data.id');
 
         $this->authenticate($firstStudentUser);
-        $this->getJson('/api/assignment-evaluations/'.$evaluationId)->assertOk();
+        $this->getJson('/api/assignment-evaluations/' . $evaluationId)->assertOk();
         $this->assertForbiddenResponse(
-            $this->patchJson('/api/assignment-evaluations/'.$evaluationId, [
+            $this->patchJson('/api/assignment-evaluations/' . $evaluationId, [
                 'marks_obtained' => 100,
             ]),
             'student updating an evaluation'
@@ -220,9 +245,9 @@ class ImmediateSecurityFixesTest extends TestCase
 
         $parentUser = $this->createParent($firstInstitution, $firstStudent);
         $this->authenticate($parentUser);
-        $this->getJson('/api/assignment-evaluations/'.$evaluationId)->assertOk();
+        $this->getJson('/api/assignment-evaluations/' . $evaluationId)->assertOk();
         $this->assertForbiddenResponse(
-            $this->deleteJson('/api/assignment-evaluations/'.$evaluationId),
+            $this->deleteJson('/api/assignment-evaluations/' . $evaluationId),
             'parent deleting an evaluation'
         );
 
@@ -242,7 +267,7 @@ class ImmediateSecurityFixesTest extends TestCase
             ->assertJsonCount(1, 'data.data')
             ->assertJsonPath('data.data.0.id', $evaluationId);
         $this->assertForbiddenResponse(
-            $this->getJson('/api/assignment-evaluations/'.$secondEvaluation->id),
+            $this->getJson('/api/assignment-evaluations/' . $secondEvaluation->id),
             'institution admin reading another institution evaluation'
         );
     }
@@ -261,7 +286,7 @@ class ImmediateSecurityFixesTest extends TestCase
     private function createInstitution(string $code): Institution
     {
         return Institution::create([
-            'name' => 'Institution '.$code,
+            'name' => 'Institution ' . $code,
             'code' => $code,
         ]);
     }
@@ -273,7 +298,7 @@ class ImmediateSecurityFixesTest extends TestCase
         $this->assertSame(
             403,
             $response->getStatusCode(),
-            $context.': '.$response->getContent()
+            $context . ': ' . $response->getContent()
         );
     }
 

@@ -38,6 +38,11 @@ class User extends Authenticatable
         ];
     }
 
+    public function parentProfiles()
+    {
+        return $this->hasMany(ParentProfile::class);
+    }
+
     public function getProfilePhotoUrlAttribute(): ?string
     {
         return $this->profile_photo

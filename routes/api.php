@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\AttendanceRecordController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BatchController;
+use App\Http\Controllers\Api\ParentDashboardController;
 use App\Http\Controllers\Api\CertificateController;
 use App\Http\Controllers\Api\CertificateSettingController;
 use App\Http\Controllers\Api\CourseController;
@@ -347,6 +348,53 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::apiResource(
             'certificate-settings',
             CertificateSettingController::class
+        );
+    });
+
+    /*
+    |--------------------------------------------------------------------------
+    | Parent Dashboard
+    |--------------------------------------------------------------------------
+    */
+
+    Route::middleware(['role:parent'])->group(function () {
+
+        // List all children linked to the authenticated parent.
+        Route::get(
+            '/parent-dashboard/children',
+            [ParentDashboardController::class, 'children']
+        );
+
+        // Dashboard for a selected child.
+        Route::get(
+            '/parent-dashboard/{studentProfile}',
+            [ParentDashboardController::class, 'show']
+        );
+
+        // Child-specific information.
+        Route::get(
+            '/parent-dashboard/{studentProfile}/attendance',
+            [ParentDashboardController::class, 'childAttendance']
+        );
+
+        Route::get(
+            '/parent-dashboard/{studentProfile}/grades',
+            [ParentDashboardController::class, 'childGrades']
+        );
+
+        Route::get(
+            '/parent-dashboard/{studentProfile}/assignments',
+            [ParentDashboardController::class, 'childAssignments']
+        );
+
+        Route::get(
+            '/parent-dashboard/{studentProfile}/courses',
+            [ParentDashboardController::class, 'childCourses']
+        );
+
+        Route::get(
+            '/parent-dashboard/{studentProfile}/live-classes',
+            [ParentDashboardController::class, 'childLiveClasses']
         );
     });
 

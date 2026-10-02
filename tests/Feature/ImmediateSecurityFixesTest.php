@@ -52,6 +52,80 @@ class ImmediateSecurityFixesTest extends TestCase
         );
     }
 
+
+    public function test_parent_dashboard_supports_multiple_children_and_blocks_unauthorized_children(): void
+    {
+        $institution = $this->createInstitution('PARENT-DASHBOARD');
+
+        [, $firstStudent] = $this->createStudent($institution);
+        [, $secondStudent] = $this->createStudent($institution);
+        [, $unrelatedStudent] = $this->createStudent($institution);
+        [, $inactiveLinkedStudent] = $this->createStudent($institution);
+
+        $parentUser = $this->createParent($institution, $firstStudent);
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $secondStudent->id,
+            'status' => 'active',
+        ]);
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $inactiveLinkedStudent->id,
+            'status' => 'inactive',
+        ]);
+
+        $this->authenticate($parentUser);
+
+        $this->getJson('/api/parent-dashboard/children')
+            ->assertOk()
+            ->assertJsonCount(2, 'data')
+            ->assertJsonFragment(['id' => $firstStudent->id])
+            ->assertJsonFragment(['id' => $secondStudent->id])
+            ->assertJsonMissing(['id' => $inactiveLinkedStudent->id]);
+
+        $this->getJson('/api/parent-dashboard/' . $firstStudent->id)
+            ->assertOk();
+
+        $this->getJson('/api/parent-dashboard/' . $secondStudent->id)
+            ->assertOk();
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/parent-dashboard/' . $unrelatedStudent->id),
+            'parent accessing an unrelated child dashboard'
+        );
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/parent-dashboard/' . $inactiveLinkedStudent->id),
+            'parent accessing a child through an inactive link'
+        );
+    }
+
+    public function test_non_parent_cannot_access_parent_dashboard(): void
+    {
+        $institution = $this->createInstitution('NON-PARENT-DASHBOARD');
+
+        [, $student] = $this->createStudent($institution);
+
+        $studentUser = User::findOrFail($student->user_id);
+
+        $this->authenticate($studentUser);
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/parent-dashboard/children'),
+            'student accessing the parent children endpoint'
+        );
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/parent-dashboard/' . $student->id),
+            'student accessing the parent dashboard'
+        );
+    }
+
+
     public function test_certificate_access_is_scoped_for_every_restricted_role(): void
     {
         $firstInstitution = $this->createInstitution('CERT-A');

@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+
 use App\Models\ParentProfile;
 use App\Models\StudentProfile;
 use App\Models\CourseEnrollment;
@@ -17,25 +18,26 @@ use Illuminate\Support\Facades\Auth;
 
 class ParentDashboardController extends Controller
 {
-    private function getParentProfile(): ParentProfile
-    {
-        $profile = ParentProfile::where('user_id', Auth::id())->first();
+    private function getParentProfileForChild(
+        StudentProfile $studentProfile
+    ): ParentProfile {
+        $parentProfile = ParentProfile::where('user_id', Auth::id())
+            ->where('student_profile_id', $studentProfile->id)
+            ->where('status', 'active')
+            ->first();
 
-        abort_unless($profile, 404, 'Parent profile not found.');
+        abort_unless(
+            $parentProfile,
+            403,
+            'Unauthorized: This child is not linked to your active parent profile.'
+        );
 
-        return $profile;
+        return $parentProfile;
     }
 
-    private function authorizeChild(StudentProfile $studentProfile, ParentProfile $parentProfile): void
+    public function show(StudentProfile $studentProfile): JsonResponse
     {
-        if ($parentProfile->student_profile_id !== $studentProfile->id) {
-            abort(403, 'Unauthorized: This child is not linked to your profile.');
-        }
-    }
-
-    public function show(): JsonResponse
-    {
-        $parentProfile = $this->getParentProfile();
+        $parentProfile = $this->getParentProfileForChild($studentProfile);
 
         $parentProfile->load([
             'user',
@@ -113,21 +115,40 @@ class ParentDashboardController extends Controller
 
     public function children(): JsonResponse
     {
-        $parentProfile = $this->getParentProfile();
+        $studentProfileIds = ParentProfile::where('user_id', Auth::id())
+            ->where('status', 'active')
+            ->pluck('student_profile_id')
+            ->unique()
+            ->values();
 
-        $children = StudentProfile::where('id', $parentProfile->student_profile_id)
+        $children = StudentProfile::whereIn('id', $studentProfileIds)
             ->with(['user', 'department', 'batch', 'institution'])
             ->get()
             ->map(function ($student) {
-                $enrolledCourses = CourseEnrollment::where('student_profile_id', $student->id)->count();
-                $completedCourses = CourseEnrollment::where('student_profile_id', $student->id)
-                    ->where('status', 'completed')->count();
-                $averageProgress = CourseEnrollment::where('student_profile_id', $student->id)
-                    ->avg('progress_percentage');
+                $enrollments = CourseEnrollment::where(
+                    'student_profile_id',
+                    $student->id
+                );
 
-                $student->setAttribute('enrolled_courses_count', $enrolledCourses);
-                $student->setAttribute('completed_courses_count', $completedCourses);
-                $student->setAttribute('overall_progress', round($averageProgress ?? 0, 2));
+                $student->setAttribute(
+                    'enrolled_courses_count',
+                    (clone $enrollments)->count()
+                );
+
+                $student->setAttribute(
+                    'completed_courses_count',
+                    (clone $enrollments)
+                        ->where('status', 'completed')
+                        ->count()
+                );
+
+                $student->setAttribute(
+                    'overall_progress',
+                    round(
+                        (clone $enrollments)->avg('progress_percentage') ?? 0,
+                        2
+                    )
+                );
 
                 return $student;
             });
@@ -140,9 +161,7 @@ class ParentDashboardController extends Controller
 
     public function childAttendance(StudentProfile $studentProfile): JsonResponse
     {
-        $parentProfile = $this->getParentProfile();
-
-        $this->authorizeChild($studentProfile, $parentProfile);
+        $this->getParentProfileForChild($studentProfile);
 
         $attendance = AttendanceRecord::where('student_profile_id', $studentProfile->id)
             ->with(['course', 'batch'])
@@ -176,9 +195,7 @@ class ParentDashboardController extends Controller
 
     public function childGrades(StudentProfile $studentProfile): JsonResponse
     {
-        $parentProfile = $this->getParentProfile();
-
-        $this->authorizeChild($studentProfile, $parentProfile);
+        $this->getParentProfileForChild($studentProfile);
 
         $gradebooks = Gradebook::where('student_profile_id', $studentProfile->id)
             ->with('course')
@@ -198,9 +215,7 @@ class ParentDashboardController extends Controller
 
     public function childAssignments(StudentProfile $studentProfile): JsonResponse
     {
-        $parentProfile = $this->getParentProfile();
-
-        $this->authorizeChild($studentProfile, $parentProfile);
+        $this->getParentProfileForChild($studentProfile);
 
         $pendingAssignments = Assignment::whereDoesntHave('submissions', function ($query) use ($studentProfile) {
             $query->where('student_profile_id', $studentProfile->id);
@@ -225,9 +240,7 @@ class ParentDashboardController extends Controller
 
     public function childCourses(StudentProfile $studentProfile): JsonResponse
     {
-        $parentProfile = $this->getParentProfile();
-
-        $this->authorizeChild($studentProfile, $parentProfile);
+        $this->getParentProfileForChild($studentProfile);
 
         $enrolledCourses = CourseEnrollment::where('student_profile_id', $studentProfile->id)
             ->with(['course.department', 'course.sections'])
@@ -245,9 +258,7 @@ class ParentDashboardController extends Controller
 
     public function childLiveClasses(StudentProfile $studentProfile): JsonResponse
     {
-        $parentProfile = $this->getParentProfile();
-
-        $this->authorizeChild($studentProfile, $parentProfile);
+        $this->getParentProfileForChild($studentProfile);
 
         $upcomingLiveClasses = LiveClass::whereHas('course.enrollments', function ($query) use ($studentProfile) {
             $query->where('student_profile_id', $studentProfile->id);

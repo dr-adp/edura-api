@@ -22,6 +22,7 @@ use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
+use App\Models\Gradebook;
 
 class ImmediateSecurityFixesTest extends TestCase
 {
@@ -101,6 +102,142 @@ class ImmediateSecurityFixesTest extends TestCase
         $this->assertForbiddenResponse(
             $this->getJson('/api/parent-dashboard/' . $inactiveLinkedStudent->id),
             'parent accessing a child through an inactive link'
+        );
+    }
+
+    public function test_parent_gradebook_access_supports_multiple_children(): void
+    {
+        $institution = $this->createInstitution('GRADEBOOK-MULTI');
+
+        [, $firstStudent] = $this->createStudent($institution);
+        [, $secondStudent] = $this->createStudent($institution);
+        [, $unrelatedStudent] = $this->createStudent($institution);
+        [, $inactiveStudent] = $this->createStudent($institution);
+
+        [, $teacher] = $this->createTeacher($institution);
+
+        $firstCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'gradebook-child-one'
+        );
+
+        $secondCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'gradebook-child-two'
+        );
+
+        $unrelatedCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'gradebook-unrelated'
+        );
+
+        $inactiveCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'gradebook-inactive-child'
+        );
+
+        $this->createEnrollment($firstCourse, $firstStudent);
+        $this->createEnrollment($secondCourse, $secondStudent);
+        $this->createEnrollment($unrelatedCourse, $unrelatedStudent);
+        $this->createEnrollment($inactiveCourse, $inactiveStudent);
+
+        $firstGradebook = Gradebook::create([
+            'course_id' => $firstCourse->id,
+            'student_profile_id' => $firstStudent->id,
+            'assignment_marks' => 40,
+            'quiz_marks' => 40,
+            'total_marks' => 80,
+            'maximum_marks' => 100,
+            'percentage' => 80,
+            'grade' => 'A',
+            'result_status' => 'passed',
+        ]);
+
+        $secondGradebook = Gradebook::create([
+            'course_id' => $secondCourse->id,
+            'student_profile_id' => $secondStudent->id,
+            'assignment_marks' => 35,
+            'quiz_marks' => 35,
+            'total_marks' => 70,
+            'maximum_marks' => 100,
+            'percentage' => 70,
+            'grade' => 'B+',
+            'result_status' => 'passed',
+        ]);
+
+        $unrelatedGradebook = Gradebook::create([
+            'course_id' => $unrelatedCourse->id,
+            'student_profile_id' => $unrelatedStudent->id,
+            'assignment_marks' => 30,
+            'quiz_marks' => 30,
+            'total_marks' => 60,
+            'maximum_marks' => 100,
+            'percentage' => 60,
+            'grade' => 'B',
+            'result_status' => 'passed',
+        ]);
+
+        $inactiveGradebook = \App\Models\Gradebook::create([
+            'course_id' => $inactiveCourse->id,
+            'student_profile_id' => $inactiveStudent->id,
+            'assignment_marks' => 20,
+            'quiz_marks' => 20,
+            'total_marks' => 40,
+            'maximum_marks' => 100,
+            'percentage' => 40,
+            'grade' => 'D',
+            'result_status' => 'passed',
+        ]);
+
+        $parentUser = $this->createParent($institution, $firstStudent);
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $secondStudent->id,
+            'status' => 'active',
+        ]);
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $inactiveStudent->id,
+            'status' => 'inactive',
+        ]);
+
+        $this->authenticate($parentUser);
+
+        // Parent can list gradebooks for all active linked children.
+        $this->getJson('/api/gradebooks')
+            ->assertOk()
+            ->assertJsonCount(2, 'data.data')
+            ->assertJsonFragment(['id' => $firstGradebook->id])
+            ->assertJsonFragment(['id' => $secondGradebook->id])
+            ->assertJsonMissing(['id' => $unrelatedGradebook->id])
+            ->assertJsonMissing(['id' => $inactiveGradebook->id]);
+
+        // Parent can view the first active linked child's gradebook.
+        $this->getJson('/api/gradebooks/' . $firstGradebook->id)
+            ->assertOk();
+
+        // Parent can view the second active linked child's gradebook.
+        $this->getJson('/api/gradebooks/' . $secondGradebook->id)
+            ->assertOk();
+
+        // Parent cannot view an unrelated child's gradebook.
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/gradebooks/' . $unrelatedGradebook->id),
+            'parent reading unrelated child gradebook'
+        );
+
+        // Parent cannot view a gradebook through an inactive parent link.
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/gradebooks/' . $inactiveGradebook->id),
+            'parent reading inactive linked child gradebook'
         );
     }
 

@@ -310,19 +310,34 @@ Route::middleware(['auth:sanctum'])->group(function () {
         );
 
         /*
-        |--------------------------------------------------------------------------
-        | Gradebook
-        |--------------------------------------------------------------------------
-        */
+|--------------------------------------------------------------------------
+| Gradebook
+|--------------------------------------------------------------------------
+*/
 
         Route::post(
             '/gradebooks/recalculate',
             [GradebookController::class, 'recalculate']
         );
 
-        Route::apiResource(
-            'gradebooks',
-            GradebookController::class
+        Route::post(
+            '/gradebooks',
+            [GradebookController::class, 'store']
+        );
+
+        Route::put(
+            '/gradebooks/{gradebook}',
+            [GradebookController::class, 'update']
+        );
+
+        Route::patch(
+            '/gradebooks/{gradebook}',
+            [GradebookController::class, 'update']
+        );
+
+        Route::delete(
+            '/gradebooks/{gradebook}',
+            [GradebookController::class, 'destroy']
         );
 
         /*
@@ -447,6 +462,22 @@ Route::middleware(['auth:sanctum'])->group(function () {
     Route::middleware([
         'role:super-admin|institution-admin|teacher|student|parent',
     ])->group(function () {
+
+        /*
+|--------------------------------------------------------------------------
+| Gradebook Read Access
+|--------------------------------------------------------------------------
+*/
+
+        Route::get(
+            '/gradebooks',
+            [GradebookController::class, 'index']
+        );
+
+        Route::get(
+            '/gradebooks/{gradebook}',
+            [GradebookController::class, 'show']
+        );
 
         /*
         |--------------------------------------------------------------------------

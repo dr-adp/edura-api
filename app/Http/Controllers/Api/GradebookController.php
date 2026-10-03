@@ -310,9 +310,12 @@ class GradebookController extends Controller
         }
 
         if ($user->hasRole('parent')) {
-            $parentProfile = $this->parentProfileFor($user);
+            $studentProfileIds = ParentProfile::where('user_id', $user->id)
+                ->where('status', 'active')
+                ->whereNotNull('student_profile_id')
+                ->pluck('student_profile_id');
 
-            $gradebooks->where('student_profile_id', $parentProfile->student_profile_id);
+            $gradebooks->whereIn('student_profile_id', $studentProfileIds);
 
             return;
         }
@@ -367,9 +370,12 @@ class GradebookController extends Controller
         }
 
         if ($user->hasRole('parent')) {
-            $parentProfile = $this->parentProfileFor($user);
+            $hasActiveParentLink = ParentProfile::where('user_id', $user->id)
+                ->where('status', 'active')
+                ->where('student_profile_id', $gradebook->student_profile_id)
+                ->exists();
 
-            if ($parentProfile && (int) $parentProfile->student_profile_id === (int) $gradebook->student_profile_id) {
+            if ($hasActiveParentLink) {
                 return;
             }
 
@@ -525,16 +531,5 @@ class GradebookController extends Controller
         }
 
         abort(403, 'Unauthorized: Student profile not found.');
-    }
-
-    private function parentProfileFor(User $user): ParentProfile
-    {
-        $parentProfile = ParentProfile::where('user_id', $user->id)->first();
-
-        if ($parentProfile && $parentProfile->student_profile_id) {
-            return $parentProfile;
-        }
-
-        abort(403, 'Unauthorized: Parent profile not found.');
     }
 }

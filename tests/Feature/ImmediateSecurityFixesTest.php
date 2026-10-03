@@ -188,6 +188,107 @@ class ImmediateSecurityFixesTest extends TestCase
         );
     }
 
+    public function test_parent_certificate_access_supports_multiple_children(): void
+    {
+        $institution = $this->createInstitution('CERT-MULTI');
+
+        [, $firstStudent] = $this->createStudent($institution);
+        [, $secondStudent] = $this->createStudent($institution);
+        [, $unrelatedStudent] = $this->createStudent($institution);
+
+        [, $teacher] = $this->createTeacher($institution);
+
+        $firstCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'certificate-child-one'
+        );
+
+        $secondCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'certificate-child-two'
+        );
+
+        $unrelatedCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'certificate-unrelated'
+        );
+
+        $this->createEnrollment($firstCourse, $firstStudent);
+        $this->createEnrollment($secondCourse, $secondStudent);
+        $this->createEnrollment($unrelatedCourse, $unrelatedStudent);
+
+        $firstCertificate = $this->createCertificate(
+            $firstCourse,
+            $firstStudent,
+            'CERT-MULTI-001'
+        );
+
+        $secondCertificate = $this->createCertificate(
+            $secondCourse,
+            $secondStudent,
+            'CERT-MULTI-002'
+        );
+
+        $unrelatedCertificate = $this->createCertificate(
+            $unrelatedCourse,
+            $unrelatedStudent,
+            'CERT-MULTI-003'
+        );
+
+        $parentUser = $this->createParent($institution, $firstStudent);
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $secondStudent->id,
+            'status' => 'active',
+        ]);
+
+        $inactiveStudent = $this->createStudent($institution)[1];
+
+        $inactiveCertificate = $this->createCertificate(
+            $firstCourse,
+            $inactiveStudent,
+            'CERT-MULTI-004'
+        );
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $inactiveStudent->id,
+            'status' => 'inactive',
+        ]);
+
+        $this->authenticate($parentUser);
+
+        $this->getJson('/api/certificates')
+            ->assertOk()
+            ->assertJsonCount(2, 'data.data')
+            ->assertJsonFragment(['id' => $firstCertificate->id])
+            ->assertJsonFragment(['id' => $secondCertificate->id])
+            ->assertJsonMissing(['id' => $unrelatedCertificate->id])
+            ->assertJsonMissing(['id' => $inactiveCertificate->id]);
+
+        $this->getJson('/api/certificates/' . $firstCertificate->id)
+            ->assertOk();
+
+        $this->getJson('/api/certificates/' . $secondCertificate->id)
+            ->assertOk();
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/certificates/' . $unrelatedCertificate->id),
+            'parent reading unrelated child certificate'
+        );
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/certificates/' . $inactiveCertificate->id),
+            'parent reading inactive linked child certificate'
+        );
+    }
+
     public function test_lesson_progress_enforces_ownership_and_parent_read_only_access(): void
     {
         $firstInstitution = $this->createInstitution('PROGRESS-A');

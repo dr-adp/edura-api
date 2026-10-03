@@ -32,8 +32,10 @@ class GradebookPolicy
         }
 
         if ($user->hasRole('parent')) {
-            $parentProfile = ParentProfile::where('user_id', $user->id)->first();
-            return $parentProfile && (int) $parentProfile->student_profile_id === (int) $gradebook->student_profile_id;
+            return ParentProfile::where('user_id', $user->id)
+                ->where('status', 'active')
+                ->where('student_profile_id', $gradebook->student_profile_id)
+                ->exists();
         }
 
         return false;

@@ -336,9 +336,13 @@ class CertificateController extends BaseApiController
         }
 
         if ($user->hasRole('parent')) {
-            $parentProfile = $this->parentProfileFor($user);
-
-            $query->where('student_profile_id', $parentProfile->student_profile_id);
+            $query->whereIn(
+                'student_profile_id',
+                ParentProfile::where('user_id', $user->id)
+                    ->where('status', 'active')
+                    ->whereNotNull('student_profile_id')
+                    ->pluck('student_profile_id')
+            );
 
             return;
         }
@@ -412,12 +416,12 @@ class CertificateController extends BaseApiController
         }
 
         if ($user->hasRole('parent')) {
-            $parentProfile = $this->parentProfileFor($user);
+            $hasActiveParentLink = ParentProfile::where('user_id', $user->id)
+                ->where('status', 'active')
+                ->where('student_profile_id', $certificate->student_profile_id)
+                ->exists();
 
-            if (
-                (int) $certificate->student_profile_id ===
-                (int) $parentProfile->student_profile_id
-            ) {
+            if ($hasActiveParentLink) {
                 return;
             }
 
@@ -540,18 +544,5 @@ class CertificateController extends BaseApiController
         }
 
         abort(403, 'Unauthorized: Student profile not found.');
-    }
-
-    private function parentProfileFor(User $user): ParentProfile
-    {
-        $parentProfile = ParentProfile::where('user_id', $user->id)
-            ->where('status', 'active')
-            ->first();
-
-        if ($parentProfile && $parentProfile->student_profile_id) {
-            return $parentProfile;
-        }
-
-        abort(403, 'Unauthorized: Parent profile not found.');
     }
 }

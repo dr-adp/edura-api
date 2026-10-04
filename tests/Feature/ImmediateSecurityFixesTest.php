@@ -906,6 +906,240 @@ class ImmediateSecurityFixesTest extends TestCase
         ]);
     }
 
+    public function test_student_learning_access_is_scoped_to_enrolled_published_course_content(): void
+    {
+        $institution = $this->createInstitution('LEARNING-ACCESS');
+
+        [$studentUser, $student] = $this->createStudent($institution);
+        [, $otherStudent] = $this->createStudent($institution);
+        [, $teacher] = $this->createTeacher($institution);
+
+        $enrolledCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'student-learning-course'
+        );
+
+        $otherCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'student-other-course'
+        );
+
+        $this->createEnrollment($enrolledCourse, $student);
+
+        $this->createEnrollment($otherCourse, $otherStudent);
+
+        $publishedLesson = $this->createLesson(
+            $enrolledCourse,
+            'Published lesson'
+        );
+
+        $otherCourseLesson = $this->createLesson(
+            $otherCourse,
+            'Other course lesson'
+        );
+
+        $draftLesson = $this->createLesson(
+            $enrolledCourse,
+            'Draft lesson'
+        );
+
+        $draftLesson->update([
+            'status' => 'draft',
+        ]);
+
+        $this->authenticate($studentUser);
+
+        // Student can list lessons from an enrolled course.
+        $this->getJson(
+            '/api/student-courses/' . $enrolledCourse->id . '/lessons'
+        )
+            ->assertOk()
+            ->assertJsonFragment([
+                'id' => $publishedLesson->id,
+            ])
+            ->assertJsonMissing([
+                'id' => $draftLesson->id,
+            ]);
+
+        // Student can view an individual published lesson
+        // from the enrolled course.
+        $this->getJson(
+            '/api/student-courses/' .
+                $enrolledCourse->id .
+                '/lessons/' .
+                $publishedLesson->id
+        )
+            ->assertOk()
+            ->assertJsonPath('data.id', $publishedLesson->id);
+
+        // Student cannot access a course in which they are not enrolled.
+        $this->assertForbiddenResponse(
+            $this->getJson(
+                '/api/student-courses/' . $otherCourse->id . '/lessons'
+            ),
+            'student accessing an unenrolled course'
+        );
+
+        // Student cannot access another course's lesson,
+        // even if the lesson ID is known.
+        $this->getJson(
+            '/api/student-courses/' .
+                $enrolledCourse->id .
+                '/lessons/' .
+                $otherCourseLesson->id
+        )
+            ->assertNotFound();
+
+        // Unpublished lessons must not be exposed.
+        $this->getJson(
+            '/api/student-courses/' .
+                $enrolledCourse->id .
+                '/lessons/' .
+                $draftLesson->id
+        )
+            ->assertNotFound();
+    }
+
+    public function test_student_lesson_resources_are_scoped_to_enrolled_published_lessons(): void
+    {
+        $institution = $this->createInstitution('RESOURCE-ACCESS');
+
+        [$studentUser, $student] = $this->createStudent($institution);
+        [, $otherStudent] = $this->createStudent($institution);
+        [, $teacher] = $this->createTeacher($institution);
+
+        $enrolledCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'student-resource-course'
+        );
+
+        $otherCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'student-other-resource-course'
+        );
+
+        $this->createEnrollment($enrolledCourse, $student);
+        $this->createEnrollment($otherCourse, $otherStudent);
+
+        $publishedLesson = $this->createLesson(
+            $enrolledCourse,
+            'Published resource lesson'
+        );
+
+        $otherCourseLesson = $this->createLesson(
+            $otherCourse,
+            'Other course resource lesson'
+        );
+
+        $draftLesson = $this->createLesson(
+            $enrolledCourse,
+            'Draft resource lesson'
+        );
+
+        $draftLesson->update([
+            'status' => 'draft',
+        ]);
+
+        $publishedResource = \App\Models\LessonResource::create([
+            'lesson_id' => $publishedLesson->id,
+            'title' => 'Published PDF',
+            'resource_type' => 'pdf',
+            'content' => 'Published resource content',
+            'sort_order' => 1,
+            'status' => 'active',
+        ]);
+
+        $inactiveResource = \App\Models\LessonResource::create([
+            'lesson_id' => $publishedLesson->id,
+            'title' => 'Inactive PDF',
+            'resource_type' => 'pdf',
+            'content' => 'Inactive resource content',
+            'sort_order' => 2,
+            'status' => 'inactive',
+        ]);
+
+        $otherCourseResource = \App\Models\LessonResource::create([
+            'lesson_id' => $otherCourseLesson->id,
+            'title' => 'Other course PDF',
+            'resource_type' => 'pdf',
+            'content' => 'Other course resource content',
+            'sort_order' => 1,
+            'status' => 'active',
+        ]);
+
+        $draftLessonResource = \App\Models\LessonResource::create([
+            'lesson_id' => $draftLesson->id,
+            'title' => 'Draft lesson PDF',
+            'resource_type' => 'pdf',
+            'content' => 'Draft lesson resource content',
+            'sort_order' => 1,
+            'status' => 'active',
+        ]);
+
+        $this->authenticate($studentUser);
+
+        // Student can access resources for a published lesson
+        // from a course in which they are enrolled.
+        $this->getJson(
+            '/api/student-courses/' .
+                $enrolledCourse->id .
+                '/lessons/' .
+                $publishedLesson->id .
+                '/resources'
+        )
+            ->assertOk()
+            ->assertJsonFragment([
+                'id' => $publishedResource->id,
+            ])
+            ->assertJsonMissing([
+                'id' => $inactiveResource->id,
+            ]);
+
+        // Student cannot access resources from an unenrolled course.
+        $this->assertForbiddenResponse(
+            $this->getJson(
+                '/api/student-courses/' .
+                    $otherCourse->id .
+                    '/lessons/' .
+                    $otherCourseLesson->id .
+                    '/resources'
+            ),
+            'student accessing resources from an unenrolled course'
+        );
+
+        // Student cannot access another course's lesson,
+        // even if the lesson ID is known.
+        $this->getJson(
+            '/api/student-courses/' .
+                $enrolledCourse->id .
+                '/lessons/' .
+                $otherCourseLesson->id .
+                '/resources'
+        )
+            ->assertNotFound();
+
+        // Resources from unpublished lessons must not be exposed.
+        $this->getJson(
+            '/api/student-courses/' .
+                $enrolledCourse->id .
+                '/lessons/' .
+                $draftLesson->id .
+                '/resources'
+        )
+            ->assertNotFound();
+
+        // Keep the variable explicitly used so the test documents
+        // that an active resource exists on the draft lesson.
+        $this->assertDatabaseHas('lesson_resources', [
+            'id' => $draftLessonResource->id,
+            'status' => 'active',
+        ]);
+    }
+
     private function createEvaluation(
         AssignmentSubmission $submission,
         TeacherProfile $teacherProfile,

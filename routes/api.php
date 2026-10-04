@@ -24,6 +24,7 @@ use App\Http\Controllers\Api\InstitutionUserController;
 use App\Http\Controllers\Api\LessonController;
 use App\Http\Controllers\Api\LessonProgressController;
 use App\Http\Controllers\Api\LessonResourceController;
+use App\Http\Controllers\Api\StudentLearningController;
 use App\Http\Controllers\Api\LiveClassAttendanceController;
 use App\Http\Controllers\Api\LiveClassController;
 use App\Http\Controllers\Api\ParentProfileController;
@@ -426,6 +427,21 @@ Route::middleware(['auth:sanctum'])->group(function () {
         Route::get(
             '/student-dashboard/{studentProfile}',
             [StudentDashboardController::class, 'show']
+        );
+
+        Route::get(
+            '/student-courses/{course}/lessons',
+            [StudentLearningController::class, 'lessons']
+        );
+
+        Route::get(
+            '/student-courses/{course}/lessons/{lesson}',
+            [StudentLearningController::class, 'showLesson']
+        );
+
+        Route::get(
+            '/student-courses/{course}/lessons/{lesson}/resources',
+            [StudentLearningController::class, 'resources']
         );
 
         Route::apiResource(

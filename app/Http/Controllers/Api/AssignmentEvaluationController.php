@@ -324,14 +324,17 @@ class AssignmentEvaluationController extends BaseApiController
         }
 
         if ($user->hasRole('parent')) {
-            $parentProfile = $this->parentProfileFor($user);
+            $studentProfileIds = ParentProfile::where('user_id', $user->id)
+                ->where('status', 'active')
+                ->whereNotNull('student_profile_id')
+                ->pluck('student_profile_id');
 
             $query->whereHas(
                 'assignmentSubmission',
-                function (Builder $submissionQuery) use ($parentProfile) {
-                    $submissionQuery->where(
+                function (Builder $submissionQuery) use ($studentProfileIds) {
+                    $submissionQuery->whereIn(
                         'student_profile_id',
-                        $parentProfile->student_profile_id
+                        $studentProfileIds
                     );
                 }
             );
@@ -464,12 +467,12 @@ class AssignmentEvaluationController extends BaseApiController
                 abort(403, 'Unauthorized: Evaluations are read-only for parents.');
             }
 
-            $parentProfile = $this->parentProfileFor($user);
+            $hasActiveParentLink = ParentProfile::where('user_id', $user->id)
+                ->where('status', 'active')
+                ->where('student_profile_id', $studentProfile->id)
+                ->exists();
 
-            if (
-                (int) $studentProfile->id ===
-                (int) $parentProfile->student_profile_id
-            ) {
+            if ($hasActiveParentLink) {
                 return;
             }
 
@@ -625,18 +628,5 @@ class AssignmentEvaluationController extends BaseApiController
         }
 
         abort(403, 'Unauthorized: Student profile not found.');
-    }
-
-    private function parentProfileFor(User $user): ParentProfile
-    {
-        $parentProfile = ParentProfile::where('user_id', $user->id)
-            ->where('status', 'active')
-            ->first();
-
-        if ($parentProfile && $parentProfile->student_profile_id) {
-            return $parentProfile;
-        }
-
-        abort(403, 'Unauthorized: Parent profile not found.');
     }
 }

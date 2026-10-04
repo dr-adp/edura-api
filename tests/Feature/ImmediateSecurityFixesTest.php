@@ -584,6 +584,127 @@ class ImmediateSecurityFixesTest extends TestCase
         );
     }
 
+    public function test_parent_assignment_evaluation_access_supports_multiple_children(): void
+    {
+        $institution = $this->createInstitution('EVAL-PARENT-MULTI');
+        $secondInstitution = $this->createInstitution('EVAL-PARENT-CROSS');
+        [, $teacher] = $this->createTeacher($institution);
+        [, $crossInstitutionTeacher] = $this->createTeacher($secondInstitution);
+        [, $firstStudent] = $this->createStudent($institution);
+        [, $secondStudent] = $this->createStudent($institution);
+        [, $unrelatedStudent] = $this->createStudent($institution);
+        [, $inactiveLinkedStudent] = $this->createStudent($institution);
+        [, $crossInstitutionStudent] = $this->createStudent($secondInstitution);
+
+        $course = $this->createCourse(
+            $institution,
+            $teacher,
+            'parent-evaluation-access'
+        );
+        $crossInstitutionCourse = $this->createCourse(
+            $secondInstitution,
+            $crossInstitutionTeacher,
+            'parent-evaluation-cross-institution'
+        );
+
+        $this->createEnrollment($course, $firstStudent);
+        $this->createEnrollment($course, $secondStudent);
+        $this->createEnrollment($course, $unrelatedStudent);
+        $this->createEnrollment($course, $inactiveLinkedStudent);
+        $this->createEnrollment($crossInstitutionCourse, $crossInstitutionStudent);
+
+        $assignment = $this->createAssignment(
+            $course,
+            $teacher,
+            'Parent evaluation assignment'
+        );
+        $crossInstitutionAssignment = $this->createAssignment(
+            $crossInstitutionCourse,
+            $crossInstitutionTeacher,
+            'Cross institution parent evaluation assignment'
+        );
+
+        $firstEvaluation = $this->createEvaluation(
+            $this->createSubmission($assignment, $firstStudent),
+            $teacher
+        );
+        $secondEvaluation = $this->createEvaluation(
+            $this->createSubmission($assignment, $secondStudent),
+            $teacher
+        );
+        $unrelatedEvaluation = $this->createEvaluation(
+            $this->createSubmission($assignment, $unrelatedStudent),
+            $teacher
+        );
+        $inactiveLinkedEvaluation = $this->createEvaluation(
+            $this->createSubmission($assignment, $inactiveLinkedStudent),
+            $teacher
+        );
+        $crossInstitutionEvaluation = $this->createEvaluation(
+            $this->createSubmission(
+                $crossInstitutionAssignment,
+                $crossInstitutionStudent
+            ),
+            $crossInstitutionTeacher
+        );
+
+        $parentUser = $this->createParent($institution, $firstStudent);
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $secondStudent->id,
+            'status' => 'active',
+        ]);
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $inactiveLinkedStudent->id,
+            'status' => 'inactive',
+        ]);
+
+        $this->authenticate($parentUser);
+
+        $listedEvaluationIds = $this->getJson('/api/assignment-evaluations')
+            ->assertOk()
+            ->assertJsonCount(2, 'data.data')
+            ->json('data.data.*.id');
+
+        $this->assertEqualsCanonicalizing(
+            [$firstEvaluation->id, $secondEvaluation->id],
+            $listedEvaluationIds
+        );
+
+        $this->getJson('/api/assignment-evaluations/' . $firstEvaluation->id)
+            ->assertOk();
+        $this->getJson('/api/assignment-evaluations/' . $secondEvaluation->id)
+            ->assertOk();
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/assignment-evaluations/' . $unrelatedEvaluation->id),
+            'parent reading unrelated child assignment evaluation'
+        );
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/assignment-evaluations/' . $inactiveLinkedEvaluation->id),
+            'parent reading inactive linked child assignment evaluation'
+        );
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/assignment-evaluations/' . $crossInstitutionEvaluation->id),
+            'parent reading another institution assignment evaluation'
+        );
+        $this->assertForbiddenResponse(
+            $this->patchJson('/api/assignment-evaluations/' . $firstEvaluation->id, [
+                'marks_obtained' => 90,
+            ]),
+            'parent updating an assignment evaluation'
+        );
+        $this->assertForbiddenResponse(
+            $this->deleteJson('/api/assignment-evaluations/' . $secondEvaluation->id),
+            'parent deleting an assignment evaluation'
+        );
+    }
+
     public function test_institution_admin_without_an_active_profile_fails_closed(): void
     {
         $adminUser = $this->createUserWithRole('institution-admin');
@@ -782,6 +903,21 @@ class ImmediateSecurityFixesTest extends TestCase
             'student_profile_id' => $studentProfile->id,
             'submitted_at' => now(),
             'status' => 'submitted',
+        ]);
+    }
+
+    private function createEvaluation(
+        AssignmentSubmission $submission,
+        TeacherProfile $teacherProfile,
+        float $marksObtained = 80
+    ): AssignmentEvaluation {
+        return AssignmentEvaluation::create([
+            'assignment_submission_id' => $submission->id,
+            'teacher_profile_id' => $teacherProfile->id,
+            'marks_obtained' => $marksObtained,
+            'maximum_marks' => 100,
+            'result_status' => 'passed',
+            'evaluated_at' => now(),
         ]);
     }
 }

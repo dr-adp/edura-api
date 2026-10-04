@@ -12,6 +12,7 @@ use App\Models\AttendanceRecord;
 use App\Models\Gradebook;
 use App\Models\LiveClass;
 use App\Models\QuizAttempt;
+use App\Models\Certificate;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Controller;
 use Illuminate\Support\Facades\Auth;
@@ -96,6 +97,11 @@ class ParentDashboardController extends Controller
             ->latest()
             ->get();
 
+        $certificates = Certificate::where('student_profile_id', $studentProfile->id)
+            ->with(['course', 'gradebook'])
+            ->latest('issued_date')
+            ->get();
+
         return response()->json([
             'message' => 'Parent dashboard fetched successfully.',
             'data' => [
@@ -109,6 +115,7 @@ class ParentDashboardController extends Controller
                 'gradebooks' => $gradebooks,
                 'upcoming_live_classes' => $upcomingLiveClasses,
                 'quiz_attempts' => $quizAttempts,
+                'certificates' => $certificates,
             ],
         ]);
     }

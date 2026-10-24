@@ -488,6 +488,97 @@ class ImmediateSecurityFixesTest extends TestCase
         );
     }
 
+    public function test_parent_lesson_progress_access_supports_multiple_children_and_blocks_unauthorized_children(): void
+    {
+        $institution = $this->createInstitution('PROGRESS-MULTI');
+        [, $teacher] = $this->createTeacher($institution);
+
+        [, $firstStudent] = $this->createStudent($institution);
+        [, $secondStudent] = $this->createStudent($institution);
+        [, $unrelatedStudent] = $this->createStudent($institution);
+        [, $inactiveStudent] = $this->createStudent($institution);
+
+        $course = $this->createCourse(
+            $institution,
+            $teacher,
+            'progress-multiple-children'
+        );
+
+        $firstEnrollment = $this->createEnrollment($course, $firstStudent);
+        $secondEnrollment = $this->createEnrollment($course, $secondStudent);
+        $unrelatedEnrollment = $this->createEnrollment($course, $unrelatedStudent);
+        $inactiveEnrollment = $this->createEnrollment($course, $inactiveStudent);
+
+        $lesson = $this->createLesson($course, 'Shared progress test lesson');
+
+        $firstProgress = $this->createProgress($firstEnrollment, $lesson);
+        $secondProgress = $this->createProgress($secondEnrollment, $lesson);
+        $unrelatedProgress = $this->createProgress($unrelatedEnrollment, $lesson);
+        $inactiveProgress = $this->createProgress($inactiveEnrollment, $lesson);
+
+        $parentUser = $this->createParent($institution, $firstStudent);
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $secondStudent->id,
+            'status' => 'active',
+        ]);
+
+        ParentProfile::create([
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $inactiveStudent->id,
+            'status' => 'inactive',
+        ]);
+
+        $this->authenticate($parentUser);
+
+        $response = $this->getJson('/api/lesson-progress')
+            ->assertOk()
+            ->assertJsonCount(2, 'data.data');
+
+        $returnedProgressIds = collect($response->json('data.data'))
+            ->pluck('id')
+            ->all();
+
+        $this->assertEqualsCanonicalizing(
+            [$firstProgress->id, $secondProgress->id],
+            $returnedProgressIds,
+            'The parent must see only progress records for actively linked children.'
+        );
+
+        $this->getJson('/api/lesson-progress/' . $firstProgress->id)
+            ->assertOk();
+
+        $this->getJson('/api/lesson-progress/' . $secondProgress->id)
+            ->assertOk();
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/lesson-progress/' . $unrelatedProgress->id),
+            'parent reading unrelated child lesson progress'
+        );
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/lesson-progress/' . $inactiveProgress->id),
+            'parent reading inactive linked child lesson progress'
+        );
+
+        $this->assertForbiddenResponse(
+            $this->patchJson('/api/lesson-progress/' . $firstProgress->id, [
+                'status' => 'in_progress',
+            ]),
+            'parent updating first linked child lesson progress'
+        );
+
+        $this->assertForbiddenResponse(
+            $this->patchJson('/api/lesson-progress/' . $secondProgress->id, [
+                'status' => 'in_progress',
+            ]),
+            'parent updating second linked child lesson progress'
+        );
+    }
+
     public function test_assignment_evaluation_blocks_cross_course_grading_and_grade_tampering(): void
     {
         $firstInstitution = $this->createInstitution('EVAL-A');

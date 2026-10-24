@@ -314,14 +314,17 @@ class LessonProgressController extends Controller
         }
 
         if ($user->hasRole('parent')) {
-            $parentProfile = $this->parentProfileFor($user);
+            $studentProfileIds = ParentProfile::where('user_id', $user->id)
+                ->where('status', 'active')
+                ->whereNotNull('student_profile_id')
+                ->pluck('student_profile_id');
 
             $query->whereHas(
                 'courseEnrollment',
-                function (Builder $enrollmentQuery) use ($parentProfile) {
-                    $enrollmentQuery->where(
+                function (Builder $enrollmentQuery) use ($studentProfileIds) {
+                    $enrollmentQuery->whereIn(
                         'student_profile_id',
-                        $parentProfile->student_profile_id
+                        $studentProfileIds
                     );
                 }
             );
@@ -445,16 +448,19 @@ class LessonProgressController extends Controller
         }
 
         if ($user->hasRole('parent')) {
-            $parentProfile = $this->parentProfileFor($user);
-
             if ($isMutation) {
                 abort(403, 'Unauthorized: Lesson progress is read-only for parents.');
             }
 
-            if (
-                (int) $courseEnrollment->student_profile_id ===
-                (int) $parentProfile->student_profile_id
-            ) {
+            $hasActiveChildLink = ParentProfile::where('user_id', $user->id)
+                ->where('status', 'active')
+                ->where(
+                    'student_profile_id',
+                    $courseEnrollment->student_profile_id
+                )
+                ->exists();
+
+            if ($hasActiveChildLink) {
                 return;
             }
 
@@ -521,16 +527,4 @@ class LessonProgressController extends Controller
         abort(403, 'Unauthorized: Student profile not found.');
     }
 
-    private function parentProfileFor(User $user): ParentProfile
-    {
-        $parentProfile = ParentProfile::where('user_id', $user->id)
-            ->where('status', 'active')
-            ->first();
-
-        if ($parentProfile && $parentProfile->student_profile_id) {
-            return $parentProfile;
-        }
-
-        abort(403, 'Unauthorized: Parent profile not found.');
-    }
 }

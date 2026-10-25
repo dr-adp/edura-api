@@ -16,7 +16,8 @@ class UpdateCourseEnrollmentRequest extends FormRequest
     public function rules(): array
     {
         /** @var CourseEnrollment $courseEnrollment */
-        $courseEnrollment = $this->route('courseEnrollment');
+        $courseEnrollment = $this->route('courseEnrollment')
+            ?? $this->route('course_enrollment');
 
         return [
             'course_id' => [

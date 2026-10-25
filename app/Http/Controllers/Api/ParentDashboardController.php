@@ -51,12 +51,16 @@ class ParentDashboardController extends Controller
         $studentProfile = $parentProfile->studentProfile;
 
         $enrolledCourses = CourseEnrollment::where('student_profile_id', $studentProfile->id)
+            ->institutionallyConsistent()
             ->with('course')
             ->get();
 
         $overallProgress = round($enrolledCourses->avg('progress_percentage') ?? 0, 2);
 
-        $pendingAssignments = Assignment::whereDoesntHave('submissions', function ($query) use ($studentProfile) {
+        $courseIds = $enrolledCourses->pluck('course_id');
+
+        $pendingAssignments = Assignment::whereIn('course_id', $courseIds)
+            ->whereDoesntHave('submissions', function ($query) use ($studentProfile) {
             $query->where('student_profile_id', $studentProfile->id);
         })
             ->with('course')
@@ -81,11 +85,13 @@ class ParentDashboardController extends Controller
         ];
 
         $gradebooks = Gradebook::where('student_profile_id', $studentProfile->id)
+            ->institutionallyConsistent()
             ->with('course')
             ->get();
 
         $upcomingLiveClasses = LiveClass::whereHas('course.enrollments', function ($query) use ($studentProfile) {
-            $query->where('student_profile_id', $studentProfile->id);
+            $query->institutionallyConsistent()
+                ->where('student_profile_id', $studentProfile->id);
         })
             ->where('scheduled_start_time', '>=', now())
             ->with(['course', 'teacherProfile.user'])
@@ -93,6 +99,7 @@ class ParentDashboardController extends Controller
             ->get();
 
         $quizAttempts = QuizAttempt::where('student_profile_id', $studentProfile->id)
+            ->institutionallyConsistent()
             ->with('quiz')
             ->latest()
             ->get();
@@ -135,7 +142,7 @@ class ParentDashboardController extends Controller
                 $enrollments = CourseEnrollment::where(
                     'student_profile_id',
                     $student->id
-                );
+                )->institutionallyConsistent();
 
                 $student->setAttribute(
                     'enrolled_courses_count',
@@ -250,6 +257,7 @@ class ParentDashboardController extends Controller
         $this->getParentProfileForChild($studentProfile);
 
         $enrolledCourses = CourseEnrollment::where('student_profile_id', $studentProfile->id)
+            ->institutionallyConsistent()
             ->with(['course.department', 'course.sections'])
             ->latest()
             ->paginate(20);
@@ -268,7 +276,8 @@ class ParentDashboardController extends Controller
         $this->getParentProfileForChild($studentProfile);
 
         $upcomingLiveClasses = LiveClass::whereHas('course.enrollments', function ($query) use ($studentProfile) {
-            $query->where('student_profile_id', $studentProfile->id);
+            $query->institutionallyConsistent()
+                ->where('student_profile_id', $studentProfile->id);
         })
             ->where('scheduled_start_time', '>=', now())
             ->with(['course', 'teacherProfile.user'])
@@ -276,7 +285,8 @@ class ParentDashboardController extends Controller
             ->get();
 
         $pastLiveClasses = LiveClass::whereHas('course.enrollments', function ($query) use ($studentProfile) {
-            $query->where('student_profile_id', $studentProfile->id);
+            $query->institutionallyConsistent()
+                ->where('student_profile_id', $studentProfile->id);
         })
             ->where('scheduled_start_time', '<', now())
             ->with(['course', 'teacherProfile.user'])

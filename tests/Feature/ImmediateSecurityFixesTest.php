@@ -8,16 +8,26 @@ use App\Models\AssignmentSubmission;
 use App\Models\Certificate;
 use App\Models\Course;
 use App\Models\CourseEnrollment;
+use App\Models\CourseSection;
 use App\Models\Institution;
 use App\Models\InstitutionUser;
 use App\Models\Lesson;
 use App\Models\LessonProgress;
 use App\Models\ParentProfile;
+use App\Models\QuestionBank;
+use App\Models\QuestionOption;
+use App\Models\Quiz;
+use App\Models\QuizAnswer;
+use App\Models\QuizAttempt;
+use App\Models\QuizQuestion;
 use App\Models\Role;
 use App\Models\StudentProfile;
 use App\Models\TeacherProfile;
 use App\Models\User;
+use App\Services\CourseEnrollmentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use Spatie\Permission\PermissionRegistrar;
@@ -452,12 +462,24 @@ class ImmediateSecurityFixesTest extends TestCase
             ->assertJsonPath('data.data.0.id', $firstProgress->id);
         $this->patchJson('/api/lesson-progress/' . $firstProgress->id, [
             'status' => 'completed',
-        ])->assertOk();
+        ])->assertUnprocessable();
+        $this->postJson('/api/lesson-progress/' . $firstProgress->id . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+        $this->authenticate($adminUser);
+        $this->postJson('/api/lesson-progress/' . $firstProgress->id . '/complete')
+            ->assertOk()
+            ->assertJsonPath('data.status', 'completed');
+        $this->authenticate($firstStudentUser);
         $this->assertForbiddenResponse(
             $this->patchJson('/api/lesson-progress/' . $secondProgress->id, [
                 'status' => 'completed',
             ]),
             'student updating another student progress'
+        );
+        $this->assertForbiddenResponse(
+            $this->postJson('/api/lesson-progress/' . $secondProgress->id . '/complete'),
+            'student completing another student lesson progress'
         );
 
         $this->authenticate($parentUser);
@@ -467,6 +489,10 @@ class ImmediateSecurityFixesTest extends TestCase
                 'status' => 'in_progress',
             ]),
             'parent updating child progress'
+        );
+        $this->assertForbiddenResponse(
+            $this->postJson('/api/lesson-progress/' . $firstProgress->id . '/complete'),
+            'parent completing child lesson progress'
         );
 
         $this->authenticate($firstTeacherUser);
@@ -486,6 +512,836 @@ class ImmediateSecurityFixesTest extends TestCase
             $this->getJson('/api/lesson-progress/' . $secondProgress->id),
             'institution admin reading another institution progress'
         );
+    }
+
+    public function test_publishing_and_unpublishing_lessons_recalculates_all_course_enrollments(): void
+    {
+        $institution = $this->createInstitution('LESSON-PUBLICATION-PROGRESS');
+        [, $teacher] = $this->createTeacher($institution);
+        $adminUser = $this->createInstitutionAdmin($institution);
+        [, $firstStudent] = $this->createStudent($institution);
+        [, $secondStudent] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'lesson-publication-progress');
+        $publishedLesson = $this->createLesson($course, 'Existing published lesson');
+        $firstEnrollment = $this->createEnrollment($course, $firstStudent);
+        $secondEnrollment = $this->createEnrollment($course, $secondStudent);
+
+        $firstProgress = $this->createProgress($firstEnrollment, $publishedLesson);
+        $firstProgress->update(['status' => 'completed']);
+        $secondProgress = $this->createProgress($secondEnrollment, $publishedLesson);
+        $secondProgress->update(['status' => 'completed']);
+
+        $enrollmentService = app(CourseEnrollmentService::class);
+        $enrollmentService->recalculateProgress($firstEnrollment);
+        $enrollmentService->recalculateProgress($secondEnrollment);
+
+        foreach ([$firstEnrollment, $secondEnrollment] as $enrollment) {
+            $this->assertSame(100.0, (float) $enrollment->fresh()->progress_percentage);
+            $this->assertSame('completed', $enrollment->fresh()->status);
+            $this->assertNotNull($enrollment->fresh()->completed_at);
+        }
+
+        $this->authenticate($adminUser);
+        $newLessonId = $this->postJson('/api/lessons', [
+            'course_id' => $course->id,
+            'title' => 'New published lesson',
+            'status' => 'published',
+        ])->assertCreated()
+            ->json('data.id');
+
+        foreach ([$firstEnrollment, $secondEnrollment] as $enrollment) {
+            $this->assertSame(50.0, (float) $enrollment->fresh()->progress_percentage);
+            $this->assertSame('active', $enrollment->fresh()->status);
+            $this->assertNull($enrollment->fresh()->completed_at);
+        }
+
+        $this->patchJson('/api/lessons/' . $newLessonId, [
+            'status' => 'draft',
+        ])->assertOk();
+
+        foreach ([$firstEnrollment, $secondEnrollment] as $enrollment) {
+            $this->assertSame(100.0, (float) $enrollment->fresh()->progress_percentage);
+            $this->assertSame('completed', $enrollment->fresh()->status);
+            $this->assertNotNull($enrollment->fresh()->completed_at);
+        }
+
+        $this->patchJson('/api/lessons/' . $newLessonId, [
+            'status' => 'published',
+        ])->assertOk();
+
+        foreach ([$firstEnrollment, $secondEnrollment] as $enrollment) {
+            $this->assertSame(50.0, (float) $enrollment->fresh()->progress_percentage);
+            $this->assertSame('active', $enrollment->fresh()->status);
+            $this->assertNull($enrollment->fresh()->completed_at);
+        }
+    }
+
+    public function test_moving_and_deleting_a_published_lesson_recalculates_affected_courses(): void
+    {
+        $institution = $this->createInstitution('LESSON-COURSE-MOVE-PROGRESS');
+        [, $teacher] = $this->createTeacher($institution);
+        $adminUser = $this->createInstitutionAdmin($institution);
+        [, $sourceStudent] = $this->createStudent($institution);
+        [, $targetStudent] = $this->createStudent($institution);
+        $sourceCourse = $this->createCourse($institution, $teacher, 'lesson-move-source');
+        $targetCourse = $this->createCourse($institution, $teacher, 'lesson-move-target');
+        $sourceCompletedLesson = $this->createLesson($sourceCourse, 'Source completed lesson');
+        $movingLesson = $this->createLesson($sourceCourse, 'Moving lesson');
+        $targetCompletedLesson = $this->createLesson($targetCourse, 'Target completed lesson');
+        $sourceEnrollment = $this->createEnrollment($sourceCourse, $sourceStudent);
+        $targetEnrollment = $this->createEnrollment($targetCourse, $targetStudent);
+
+        $sourceProgress = $this->createProgress($sourceEnrollment, $sourceCompletedLesson);
+        $sourceProgress->update(['status' => 'completed']);
+        $targetProgress = $this->createProgress($targetEnrollment, $targetCompletedLesson);
+        $targetProgress->update(['status' => 'completed']);
+
+        $enrollmentService = app(CourseEnrollmentService::class);
+        $enrollmentService->recalculateProgress($sourceEnrollment);
+        $enrollmentService->recalculateProgress($targetEnrollment);
+
+        $this->assertSame(50.0, (float) $sourceEnrollment->fresh()->progress_percentage);
+        $this->assertSame('active', $sourceEnrollment->fresh()->status);
+        $this->assertNull($sourceEnrollment->fresh()->completed_at);
+        $this->assertSame(100.0, (float) $targetEnrollment->fresh()->progress_percentage);
+        $this->assertSame('completed', $targetEnrollment->fresh()->status);
+        $this->assertNotNull($targetEnrollment->fresh()->completed_at);
+
+        $this->authenticate($adminUser);
+        $this->patchJson('/api/lessons/' . $movingLesson->id, [
+            'course_id' => $targetCourse->id,
+        ])->assertOk();
+
+        $this->assertSame(100.0, (float) $sourceEnrollment->fresh()->progress_percentage);
+        $this->assertSame('completed', $sourceEnrollment->fresh()->status);
+        $this->assertNotNull($sourceEnrollment->fresh()->completed_at);
+        $this->assertSame(50.0, (float) $targetEnrollment->fresh()->progress_percentage);
+        $this->assertSame('active', $targetEnrollment->fresh()->status);
+        $this->assertNull($targetEnrollment->fresh()->completed_at);
+
+        $this->deleteJson('/api/lessons/' . $movingLesson->id)->assertOk();
+
+        $this->assertSoftDeleted('lessons', ['id' => $movingLesson->id]);
+        $this->assertSame(100.0, (float) $targetEnrollment->fresh()->progress_percentage);
+        $this->assertSame('completed', $targetEnrollment->fresh()->status);
+        $this->assertNotNull($targetEnrollment->fresh()->completed_at);
+    }
+
+    public function test_lesson_move_rejects_assessments_that_would_remain_in_the_source_course(): void
+    {
+        $institution = $this->createInstitution('LESSON-MOVE-ASSESSMENTS');
+        [, $teacher] = $this->createTeacher($institution);
+        $adminUser = $this->createInstitutionAdmin($institution);
+        $sourceCourse = $this->createCourse($institution, $teacher, 'lesson-assessment-source');
+        $targetCourse = $this->createCourse($institution, $teacher, 'lesson-assessment-target');
+        $sourceSection = CourseSection::create([
+            'course_id' => $sourceCourse->id,
+            'title' => 'Source section',
+            'sort_order' => 1,
+            'status' => 'active',
+        ]);
+        $lesson = $this->createLesson($sourceCourse, 'Lesson with published assessments');
+        $lesson->update(['course_section_id' => $sourceSection->id]);
+        $quiz = Quiz::create([
+            'course_id' => $sourceCourse->id,
+            'lesson_id' => $lesson->id,
+            'teacher_profile_id' => $teacher->id,
+            'title' => 'Source lesson quiz',
+            'total_marks' => 1,
+            'passing_marks' => 1,
+            'status' => 'published',
+        ]);
+        $assignment = $this->createAssignment(
+            $sourceCourse,
+            $teacher,
+            'Source lesson assignment'
+        );
+        $assignment->update(['lesson_id' => $lesson->id]);
+
+        $this->authenticate($adminUser);
+        $this->patchJson('/api/lessons/' . $lesson->id, [
+            'course_id' => $targetCourse->id,
+        ])->assertUnprocessable();
+
+        $this->assertDatabaseHas('lessons', [
+            'id' => $lesson->id,
+            'course_id' => $sourceCourse->id,
+            'course_section_id' => $sourceSection->id,
+        ]);
+        $this->assertDatabaseHas('quizzes', [
+            'id' => $quiz->id,
+            'course_id' => $sourceCourse->id,
+            'lesson_id' => $lesson->id,
+        ]);
+        $this->assertDatabaseHas('assignments', [
+            'id' => $assignment->id,
+            'course_id' => $sourceCourse->id,
+            'lesson_id' => $lesson->id,
+        ]);
+    }
+
+    public function test_moved_lesson_clears_foreign_section_and_target_assessments_still_require_evidence(): void
+    {
+        $institution = $this->createInstitution('LESSON-MOVE-TARGET-EVIDENCE');
+        [, $teacher] = $this->createTeacher($institution);
+        $adminUser = $this->createInstitutionAdmin($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $sourceCourse = $this->createCourse($institution, $teacher, 'lesson-section-source');
+        $targetCourse = $this->createCourse($institution, $teacher, 'lesson-section-target');
+        $enrollment = $this->createEnrollment($targetCourse, $student);
+        $sourceSection = CourseSection::create([
+            'course_id' => $sourceCourse->id,
+            'title' => 'Source-only section',
+            'sort_order' => 1,
+            'status' => 'active',
+        ]);
+        $lesson = $this->createLesson($sourceCourse, 'Moved assessment lesson');
+        $lesson->update(['course_section_id' => $sourceSection->id]);
+
+        $this->authenticate($adminUser);
+        $this->patchJson('/api/lessons/' . $lesson->id, [
+            'course_id' => $targetCourse->id,
+        ])->assertOk()
+            ->assertJsonPath('data.course_id', $targetCourse->id)
+            ->assertJsonPath('data.course_section_id', null)
+            ->assertJsonPath('data.course_section', null);
+
+        $quiz = Quiz::create([
+            'course_id' => $targetCourse->id,
+            'lesson_id' => $lesson->id,
+            'teacher_profile_id' => $teacher->id,
+            'title' => 'Target lesson quiz',
+            'total_marks' => 1,
+            'passing_marks' => 1,
+            'status' => 'published',
+        ]);
+        $assignment = $this->createAssignment(
+            $targetCourse,
+            $teacher,
+            'Target lesson assignment'
+        );
+        $assignment->update(['lesson_id' => $lesson->id]);
+
+        // Simulate a pre-existing stale section reference and verify it is not serialized to students.
+        $lesson->update(['course_section_id' => $sourceSection->id]);
+        $this->authenticate($studentUser);
+        $this->getJson('/api/student-courses/' . $targetCourse->id . '/lessons')
+            ->assertOk()
+            ->assertJsonPath('data.0.course_section_id', null)
+            ->assertJsonPath('data.0.course_section', null);
+        $this->getJson('/api/student-courses/' . $targetCourse->id . '/lessons/' . $lesson->id)
+            ->assertOk()
+            ->assertJsonPath('data.course_section_id', null)
+            ->assertJsonPath('data.course_section', null);
+
+        $progressResponse = $this->postJson('/api/lesson-progress', [
+            'course_enrollment_id' => $enrollment->id,
+            'lesson_id' => $lesson->id,
+            'status' => 'in_progress',
+            'progress_percentage' => 80,
+        ])->assertCreated();
+        $progressId = $progressResponse->json('data.id');
+
+        $this->postJson('/api/lesson-progress/' . $progressId . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        QuizAttempt::create([
+            'quiz_id' => $quiz->id,
+            'student_profile_id' => $student->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinute(),
+            'submitted_at' => now(),
+            'total_marks' => 1,
+            'marks_obtained' => 1,
+            'percentage' => 100,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+
+        $this->postJson('/api/lesson-progress/' . $progressId . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        AssignmentSubmission::create([
+            'assignment_id' => $assignment->id,
+            'student_profile_id' => $student->id,
+            'submission_text' => 'Target-course assignment response',
+            'submitted_at' => now(),
+            'status' => 'submitted',
+        ]);
+
+        $this->postJson('/api/lesson-progress/' . $progressId . '/complete')
+            ->assertOk()
+            ->assertJsonPath('data.status', 'completed');
+    }
+
+    public function test_students_cannot_forge_lesson_completion_and_staff_can_complete_and_recalculate_progress(): void
+    {
+        $institution = $this->createInstitution('SECURE-COMPLETION');
+        [, $teacher] = $this->createTeacher($institution);
+        $adminUser = $this->createInstitutionAdmin($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        [, $otherStudent] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'secure-completion');
+        $enrollment = $this->createEnrollment($course, $student);
+        $otherEnrollment = $this->createEnrollment($course, $otherStudent);
+        $lesson = $this->createLesson($course, 'Reading lesson');
+        $otherLesson = $this->createLesson($course, 'Other student lesson');
+        $this->createLesson($course, 'Third lesson');
+        $otherProgress = $this->createProgress($otherEnrollment, $otherLesson);
+
+        $this->authenticate($studentUser);
+
+        $this->postJson('/api/lesson-progress', [
+            'course_enrollment_id' => $enrollment->id,
+            'lesson_id' => $lesson->id,
+            'status' => 'completed',
+            'progress_percentage' => 100,
+        ])->assertUnprocessable();
+
+        $this->postJson('/api/lesson-progress', [
+            'course_enrollment_id' => $enrollment->id,
+            'lesson_id' => $lesson->id,
+            'status' => 'in_progress',
+            'progress_percentage' => 100,
+        ])->assertUnprocessable();
+
+        $this->patchJson('/api/course-enrollments/' . $enrollment->id, [
+            'progress_percentage' => 100,
+            'status' => 'completed',
+        ])->assertForbidden();
+        $this->postJson('/api/course-enrollments', [
+            'course_id' => $course->id,
+            'student_profile_id' => $student->id,
+            'progress_percentage' => 100,
+            'status' => 'completed',
+        ])->assertForbidden();
+
+        $this->postJson('/api/lesson-progress', [
+            'course_enrollment_id' => $enrollment->id,
+            'lesson_id' => $lesson->id,
+            'status' => 'in_progress',
+            'progress_percentage' => 35,
+        ])->assertCreated()
+            ->assertJsonPath('data.progress_percentage', '35.00');
+
+        $progress = LessonProgress::where('course_enrollment_id', $enrollment->id)
+            ->where('lesson_id', $lesson->id)
+            ->firstOrFail();
+
+        $this->patchJson('/api/lesson-progress/' . $progress->id, [
+            'progress_percentage' => 100,
+        ])->assertUnprocessable();
+
+        $this->assertForbiddenResponse(
+            $this->postJson('/api/lesson-progress/' . $otherProgress->id . '/complete'),
+            'student completing another student progress'
+        );
+
+        $this->postJson('/api/lesson-progress/' . $progress->id . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        $this->authenticate($adminUser);
+        $this->postJson('/api/lesson-progress/' . $progress->id . '/complete')
+            ->assertOk()
+            ->assertJsonPath('data.status', 'completed')
+            ->assertJsonPath('data.progress_percentage', '100.00');
+
+        $this->assertSame(
+            33.33,
+            (float) $enrollment->fresh()->progress_percentage
+        );
+        $this->assertSame('active', $enrollment->fresh()->status);
+        $this->assertNull($enrollment->fresh()->completed_at);
+
+        $secondProgress = $this->createProgress($enrollment, $otherLesson);
+        $thirdProgress = $this->createProgress(
+            $enrollment,
+            Lesson::where('course_id', $course->id)
+                ->where('title', 'Third lesson')
+                ->firstOrFail()
+        );
+
+        $this->postJson('/api/lesson-progress/' . $secondProgress->id . '/complete')
+            ->assertOk();
+        $this->assertSame(66.67, (float) $enrollment->fresh()->progress_percentage);
+        $this->assertSame('active', $enrollment->fresh()->status);
+
+        $this->postJson('/api/lesson-progress/' . $thirdProgress->id . '/complete')
+            ->assertOk();
+        $this->assertSame(100.0, (float) $enrollment->fresh()->progress_percentage);
+        $this->assertSame('completed', $enrollment->fresh()->status);
+        $this->assertNotNull($enrollment->fresh()->completed_at);
+
+        $this->authenticate($adminUser);
+        $this->patchJson('/api/course-enrollments/' . $enrollment->id, [
+            'progress_percentage' => 0,
+            'status' => 'active',
+        ])->assertOk();
+        $this->assertSame(100.0, (float) $enrollment->fresh()->progress_percentage);
+        $this->assertSame('completed', $enrollment->fresh()->status);
+
+        $this->deleteJson('/api/lesson-progress/' . $thirdProgress->id)->assertOk();
+        $this->assertSame(66.67, (float) $enrollment->fresh()->progress_percentage);
+        $this->assertSame('active', $enrollment->fresh()->status);
+        $this->assertNull($enrollment->fresh()->completed_at);
+    }
+
+    public function test_students_cannot_reassign_a_completed_progress_record_to_another_lesson(): void
+    {
+        $institution = $this->createInstitution('COMPLETED-LESSON-REASSIGNMENT');
+        [, $teacher] = $this->createTeacher($institution);
+        $adminUser = $this->createInstitutionAdmin($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'completed-lesson-reassignment');
+        $enrollment = $this->createEnrollment($course, $student);
+        $completedLesson = $this->createLesson($course, 'Completed lesson');
+        $targetLesson = $this->createLesson($course, 'Target lesson');
+        $progress = $this->createProgress($enrollment, $completedLesson);
+
+        $this->authenticate($adminUser);
+        $this->postJson('/api/lesson-progress/' . $progress->id . '/complete')
+            ->assertOk()
+            ->assertJsonPath('data.status', 'completed');
+
+        $this->assertSame(50.0, (float) $enrollment->fresh()->progress_percentage);
+
+        $this->authenticate($studentUser);
+        $this->patchJson('/api/lesson-progress/' . $progress->id, [
+            'lesson_id' => $targetLesson->id,
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('lesson_id');
+
+        $this->assertSame(
+            (int) $completedLesson->id,
+            (int) $progress->fresh()->lesson_id
+        );
+        $this->assertSame('completed', $progress->fresh()->status);
+        $this->assertSame(
+            0,
+            LessonProgress::where('course_enrollment_id', $enrollment->id)
+                ->where('lesson_id', $targetLesson->id)
+                ->where('status', 'completed')
+                ->count()
+        );
+        $this->assertSame(50.0, (float) $enrollment->fresh()->progress_percentage);
+        $this->assertSame('active', $enrollment->fresh()->status);
+    }
+
+    public function test_student_reopening_completed_lesson_resets_progress_and_enrollment_completion(): void
+    {
+        $institution = $this->createInstitution('REOPEN-COMPLETED-LESSON');
+        [, $teacher] = $this->createTeacher($institution);
+        $adminUser = $this->createInstitutionAdmin($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'reopen-completed-lesson');
+        $enrollment = $this->createEnrollment($course, $student);
+        $lesson = $this->createLesson($course, 'Reopened lesson');
+        $progress = $this->createProgress($enrollment, $lesson);
+
+        $this->authenticate($adminUser);
+        $this->patchJson('/api/lesson-progress/' . $progress->id, [
+            'status' => 'completed',
+            'progress_percentage' => 35,
+        ])->assertOk()
+            ->assertJsonPath('data.status', 'completed')
+            ->assertJsonPath('data.progress_percentage', '100.00');
+
+        $progress->refresh();
+        $this->assertNotNull($progress->completed_at);
+        $this->assertSame(100.0, (float) $enrollment->fresh()->progress_percentage);
+        $this->assertSame('completed', $enrollment->fresh()->status);
+        $this->assertNotNull($enrollment->fresh()->completed_at);
+
+        $this->authenticate($studentUser);
+        $this->patchJson('/api/lesson-progress/' . $progress->id, [
+            'status' => 'in_progress',
+        ])->assertOk()
+            ->assertJsonPath('data.status', 'in_progress')
+            ->assertJsonPath('data.progress_percentage', '0.00')
+            ->assertJsonPath('data.completed_at', null);
+
+        $progress->refresh();
+        $this->assertSame('in_progress', $progress->status);
+        $this->assertSame(0.0, (float) $progress->progress_percentage);
+        $this->assertNull($progress->completed_at);
+        $this->assertSame(0.0, (float) $enrollment->fresh()->progress_percentage);
+        $this->assertSame('active', $enrollment->fresh()->status);
+        $this->assertNull($enrollment->fresh()->completed_at);
+
+        $this->patchJson('/api/lesson-progress/' . $progress->id, [
+            'progress_percentage' => 35,
+        ])->assertOk()
+            ->assertJsonPath('data.status', 'in_progress')
+            ->assertJsonPath('data.progress_percentage', '35.00')
+            ->assertJsonPath('data.completed_at', null);
+    }
+
+    public function test_attached_published_assessments_require_server_recorded_evidence_for_lesson_completion(): void
+    {
+        $institution = $this->createInstitution('ASSESSMENT-COMPLETION');
+        [, $teacher] = $this->createTeacher($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'assessment-completion');
+        $enrollment = $this->createEnrollment($course, $student);
+        $lesson = $this->createLesson($course, 'Assessment lesson');
+        $assignment = $this->createAssignment($course, $teacher, 'Lesson assignment');
+        $assignment->update(['lesson_id' => $lesson->id]);
+        $urlAssignment = $this->createAssignment($course, $teacher, 'URL assignment');
+        $urlAssignment->update(['lesson_id' => $lesson->id]);
+        $fileAssignment = $this->createAssignment($course, $teacher, 'File assignment');
+        $fileAssignment->update(['lesson_id' => $lesson->id]);
+        $quiz = Quiz::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'teacher_profile_id' => $teacher->id,
+            'title' => 'Lesson quiz',
+            'passing_marks' => 1,
+            'total_marks' => 1,
+            'status' => 'published',
+        ]);
+
+        $this->authenticate($studentUser);
+        $this->postJson('/api/lesson-progress', [
+            'course_enrollment_id' => $enrollment->id,
+            'lesson_id' => $lesson->id,
+            'status' => 'in_progress',
+            'progress_percentage' => 80,
+        ])->assertCreated();
+
+        $progress = LessonProgress::where('course_enrollment_id', $enrollment->id)
+            ->where('lesson_id', $lesson->id)
+            ->firstOrFail();
+
+        $this->postJson('/api/lesson-progress/' . $progress->id . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        QuizAttempt::create([
+            'quiz_id' => $quiz->id,
+            'student_profile_id' => $student->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinute(),
+            'submitted_at' => now(),
+            'total_marks' => 1,
+            'marks_obtained' => 1,
+            'percentage' => 100,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+
+        $this->postJson('/api/lesson-progress/' . $progress->id . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        $emptySubmissionId = $this->postJson('/api/assignment-submissions', [
+            'assignment_id' => $assignment->id,
+            'student_profile_id' => $student->id,
+            'status' => 'submitted',
+        ])
+            ->assertCreated()
+            ->assertJsonPath('data.submission_text', null)
+            ->assertJsonPath('data.external_url', null)
+            ->assertJsonPath('data.file_path', null)
+            ->json('data.id');
+
+        $url = 'https://example.test/lesson-assignment';
+        $this->postJson('/api/assignment-submissions', [
+            'assignment_id' => $urlAssignment->id,
+            'student_profile_id' => $student->id,
+            'external_url' => $url,
+            'status' => 'submitted',
+        ])->assertCreated();
+
+        Storage::fake('public');
+        $fileResponse = $this->post('/api/assignment-submissions', [
+            'assignment_id' => $fileAssignment->id,
+            'student_profile_id' => $student->id,
+            'file' => UploadedFile::fake()->create('solution.pdf', 5, 'application/pdf'),
+            'status' => 'submitted',
+        ], ['Accept' => 'application/json'])->assertCreated();
+        $filePath = $fileResponse->json('data.file_path');
+        $this->assertStringStartsWith('assignment-submissions/', $filePath);
+        Storage::disk('public')->assertExists($filePath);
+
+        $this->postJson('/api/lesson-progress/' . $progress->id . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        $this->patchJson('/api/assignment-submissions/' . $emptySubmissionId, [
+            'submission_text' => 'My completed response',
+        ])->assertOk()
+            ->assertJsonPath('data.submission_text', 'My completed response');
+
+        $this->postJson('/api/lesson-progress/' . $progress->id . '/complete')
+            ->assertOk()
+            ->assertJsonPath('data.status', 'completed');
+    }
+
+    public function test_manual_quiz_attempt_stays_pending_until_every_manual_answer_is_graded(): void
+    {
+        $institution = $this->createInstitution('MANUAL-QUIZ-GRADING');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'manual-quiz-grading');
+        $enrollment = $this->createEnrollment($course, $student);
+        $lesson = $this->createLesson($course, 'Manual quiz lesson');
+
+        $quiz = Quiz::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'teacher_profile_id' => $teacher->id,
+            'title' => 'Manual grading quiz',
+            'total_marks' => 10,
+            'passing_marks' => 4,
+            'show_result_immediately' => true,
+            'status' => 'published',
+        ]);
+
+        $shortAnswer = QuestionBank::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'question_text' => 'Explain the first concept.',
+            'question_type' => 'short_answer',
+            'marks' => 4,
+            'status' => 'active',
+        ]);
+        $longAnswer = QuestionBank::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'question_text' => 'Explain the second concept.',
+            'question_type' => 'long_answer',
+            'marks' => 4,
+            'status' => 'active',
+        ]);
+        $multipleChoice = QuestionBank::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'question_text' => 'Select the correct option.',
+            'question_type' => 'mcq',
+            'marks' => 2,
+            'status' => 'active',
+        ]);
+
+        foreach ([$shortAnswer, $longAnswer, $multipleChoice] as $index => $question) {
+            QuizQuestion::create([
+                'quiz_id' => $quiz->id,
+                'question_bank_id' => $question->id,
+                'marks' => $question->marks,
+                'sort_order' => $index + 1,
+            ]);
+        }
+
+        $correctOption = QuestionOption::create([
+            'question_bank_id' => $multipleChoice->id,
+            'option_text' => 'Correct option',
+            'is_correct' => true,
+            'sort_order' => 1,
+        ]);
+
+        $this->authenticate($studentUser);
+        $progressResponse = $this->postJson('/api/lesson-progress', [
+            'course_enrollment_id' => $enrollment->id,
+            'lesson_id' => $lesson->id,
+            'status' => 'in_progress',
+            'progress_percentage' => 80,
+        ])->assertCreated();
+        $progressId = $progressResponse->json('data.id');
+
+        $attemptResponse = $this->postJson('/api/quiz-attempts', [
+            'quiz_id' => $quiz->id,
+            'student_profile_id' => $student->id,
+        ])->assertCreated();
+        $attemptId = $attemptResponse->json('data.id');
+
+        $shortAnswerId = $this->postJson('/api/quiz-answers', [
+            'quiz_attempt_id' => $attemptId,
+            'question_bank_id' => $shortAnswer->id,
+            'answer_text' => 'First submitted response',
+        ])->assertCreated()->json('data.id');
+        $longAnswerId = $this->postJson('/api/quiz-answers', [
+            'quiz_attempt_id' => $attemptId,
+            'question_bank_id' => $longAnswer->id,
+            'answer_text' => 'Second submitted response',
+        ])->assertCreated()->json('data.id');
+        $multipleChoiceAnswerId = $this->postJson('/api/quiz-answers', [
+            'quiz_attempt_id' => $attemptId,
+            'question_bank_id' => $multipleChoice->id,
+            'question_option_id' => $correctOption->id,
+        ])->assertCreated()->json('data.id');
+
+        $this->assertDatabaseHas('quiz_answers', [
+            'id' => $multipleChoiceAnswerId,
+            'marks_obtained' => 2,
+        ]);
+
+        $this->patchJson('/api/quiz-attempts/' . $attemptId, [
+            'status' => 'submitted',
+        ])->assertOk()->assertJsonPath('data.status', 'submitted');
+
+        $this->authenticate($teacherUser);
+        $this->patchJson('/api/quiz-answers/' . $shortAnswerId, [
+            'marks_obtained' => 2,
+        ])->assertOk();
+
+        $attempt = QuizAttempt::findOrFail($attemptId);
+        $this->assertSame('submitted', $attempt->status);
+        $this->assertSame('pending', $attempt->result_status);
+        $this->assertDatabaseHas('quiz_answers', [
+            'id' => $shortAnswerId,
+            'marks_obtained' => 2,
+        ]);
+        $this->assertNotNull(QuizAnswer::findOrFail($shortAnswerId)->manually_graded_at);
+        $this->assertNull(QuizAnswer::findOrFail($longAnswerId)->manually_graded_at);
+
+        $this->authenticate($studentUser);
+        $this->postJson('/api/lesson-progress/' . $progressId . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        $this->authenticate($teacherUser);
+        $this->patchJson('/api/quiz-answers/' . $longAnswerId, [
+            'marks_obtained' => 0,
+        ])->assertOk();
+
+        $attempt->refresh();
+        $this->assertSame('evaluated', $attempt->status);
+        $this->assertSame('passed', $attempt->result_status);
+        $this->assertSame('4.00', $attempt->marks_obtained);
+        $this->assertSame('40.00', $attempt->percentage);
+        $this->assertNotNull(QuizAnswer::findOrFail($longAnswerId)->manually_graded_at);
+
+        $this->authenticate($studentUser);
+        $this->postJson('/api/lesson-progress/' . $progressId . '/complete')
+            ->assertOk()
+            ->assertJsonPath('data.status', 'completed');
+    }
+
+    public function test_pending_manual_answers_block_evaluated_evidence_and_can_be_graded(): void
+    {
+        $institution = $this->createInstitution('UN-GRADED-MANUAL-EVIDENCE');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'ungraded-manual-evidence');
+        $enrollment = $this->createEnrollment($course, $student);
+        $lesson = $this->createLesson($course, 'Manual evidence lesson');
+
+        $quiz = Quiz::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'teacher_profile_id' => $teacher->id,
+            'title' => 'Manual evidence quiz',
+            'total_marks' => 6,
+            'passing_marks' => 2,
+            'status' => 'published',
+        ]);
+        $manualQuestion = QuestionBank::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'question_text' => 'Explain this concept.',
+            'question_type' => 'short_answer',
+            'marks' => 2,
+            'status' => 'active',
+        ]);
+        $secondManualQuestion = QuestionBank::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'question_text' => 'Explain another concept.',
+            'question_type' => 'long_answer',
+            'marks' => 2,
+            'status' => 'active',
+        ]);
+        $automaticQuestion = QuestionBank::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'question_text' => 'Select the correct option.',
+            'question_type' => 'mcq',
+            'marks' => 2,
+            'status' => 'active',
+        ]);
+
+        foreach ([$manualQuestion, $secondManualQuestion, $automaticQuestion] as $index => $question) {
+            QuizQuestion::create([
+                'quiz_id' => $quiz->id,
+                'question_bank_id' => $question->id,
+                'marks' => $question->marks,
+                'sort_order' => $index + 1,
+            ]);
+        }
+
+        $attempt = QuizAttempt::create([
+            'quiz_id' => $quiz->id,
+            'student_profile_id' => $student->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinute(),
+            'submitted_at' => now(),
+            'total_marks' => 6,
+            'marks_obtained' => 2,
+            'percentage' => 33.33,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+        $manualAnswer = QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $manualQuestion->id,
+            'answer_text' => 'A submitted manual response',
+            'marks_obtained' => 0,
+        ]);
+        $secondManualAnswer = QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $secondManualQuestion->id,
+            'answer_text' => 'Another submitted manual response',
+            'marks_obtained' => 0,
+        ]);
+        QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $automaticQuestion->id,
+            'marks_obtained' => 2,
+            'is_correct' => true,
+        ]);
+
+        $this->authenticate($studentUser);
+        $progressResponse = $this->postJson('/api/lesson-progress', [
+            'course_enrollment_id' => $enrollment->id,
+            'lesson_id' => $lesson->id,
+            'status' => 'in_progress',
+            'progress_percentage' => 80,
+        ])->assertCreated();
+
+        $this->postJson('/api/lesson-progress/' . $progressResponse->json('data.id') . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        $this->authenticate($teacherUser);
+        $this->patchJson('/api/quiz-answers/' . $manualAnswer->id, [
+            'marks_obtained' => 2,
+        ])->assertOk();
+
+        $attempt->refresh();
+        $this->assertSame('submitted', $attempt->status);
+        $this->assertSame('pending', $attempt->result_status);
+
+        $this->authenticate($studentUser);
+        $this->postJson('/api/lesson-progress/' . $progressResponse->json('data.id') . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        $this->authenticate($teacherUser);
+        $this->patchJson('/api/quiz-answers/' . $secondManualAnswer->id, [
+            'marks_obtained' => 0,
+        ])->assertOk();
+
+        $attempt->refresh();
+        $this->assertSame('evaluated', $attempt->status);
+        $this->assertSame('passed', $attempt->result_status);
+        $this->assertNotNull($secondManualAnswer->fresh()->manually_graded_at);
+
+        $this->authenticate($studentUser);
+        $this->postJson('/api/lesson-progress/' . $progressResponse->json('data.id') . '/complete')
+            ->assertOk()
+            ->assertJsonPath('data.status', 'completed');
     }
 
     public function test_parent_lesson_progress_access_supports_multiple_children_and_blocks_unauthorized_children(): void
@@ -805,6 +1661,219 @@ class ImmediateSecurityFixesTest extends TestCase
         $this->getJson('/api/certificates')->assertForbidden();
         $this->getJson('/api/lesson-progress')->assertForbidden();
         $this->getJson('/api/assignment-evaluations')->assertForbidden();
+    }
+
+    public function test_inactive_institution_admin_cannot_access_lessons_or_course_enrollments(): void
+    {
+        $institution = $this->createInstitution('INACTIVE-INSTITUTION-ADMIN');
+        [, $teacher] = $this->createTeacher($institution);
+        [, $firstStudent] = $this->createStudent($institution);
+        [, $secondStudent] = $this->createStudent($institution);
+        $adminUser = $this->createInstitutionAdmin($institution);
+        $course = $this->createCourse($institution, $teacher, 'inactive-admin-access');
+        $lesson = $this->createLesson($course, 'Protected lesson');
+        $enrollment = $this->createEnrollment($course, $firstStudent);
+
+        InstitutionUser::where('user_id', $adminUser->id)
+            ->update(['status' => 'inactive']);
+
+        $this->authenticate($adminUser);
+
+        $this->getJson('/api/lessons')->assertForbidden();
+        $this->getJson('/api/lessons/' . $lesson->id)->assertForbidden();
+        $this->postJson('/api/lessons', [
+            'course_id' => $course->id,
+            'title' => 'Unauthorized lesson',
+            'status' => 'draft',
+        ])->assertForbidden();
+        $this->patchJson('/api/lessons/' . $lesson->id, [
+            'title' => 'Unauthorized update',
+        ])->assertForbidden();
+        $this->deleteJson('/api/lessons/' . $lesson->id)->assertForbidden();
+
+        $this->getJson('/api/course-enrollments')->assertForbidden();
+        $this->getJson('/api/course-enrollments/' . $enrollment->id)->assertForbidden();
+        $this->postJson('/api/course-enrollments', [
+            'course_id' => $course->id,
+            'student_profile_id' => $secondStudent->id,
+        ])->assertForbidden();
+        $this->patchJson('/api/course-enrollments/' . $enrollment->id, [
+            'payment_status' => 'paid',
+            'amount_paid' => 10,
+        ])->assertForbidden();
+        $this->deleteJson('/api/course-enrollments/' . $enrollment->id)->assertForbidden();
+
+        $this->assertDatabaseHas('lessons', [
+            'id' => $lesson->id,
+            'title' => 'Protected lesson',
+            'deleted_at' => null,
+        ]);
+        $this->assertDatabaseHas('course_enrollments', [
+            'id' => $enrollment->id,
+            'student_profile_id' => $firstStudent->id,
+            'deleted_at' => null,
+        ]);
+        $this->assertDatabaseMissing('course_enrollments', [
+            'course_id' => $course->id,
+            'student_profile_id' => $secondStudent->id,
+        ]);
+    }
+
+    public function test_active_institution_admin_and_super_admin_can_access_lessons_and_course_enrollments(): void
+    {
+        $institution = $this->createInstitution('ACTIVE-INSTITUTION-ADMIN');
+        [, $teacher] = $this->createTeacher($institution);
+        [, $firstStudent] = $this->createStudent($institution);
+        [, $secondStudent] = $this->createStudent($institution);
+        $adminUser = $this->createInstitutionAdmin($institution);
+        $course = $this->createCourse($institution, $teacher, 'active-admin-access');
+        $lesson = $this->createLesson($course, 'Accessible lesson');
+        $enrollment = $this->createEnrollment($course, $firstStudent);
+
+        $this->authenticate($adminUser);
+
+        $this->getJson('/api/lessons')->assertOk();
+        $this->getJson('/api/lessons/' . $lesson->id)->assertOk();
+        $this->getJson('/api/course-enrollments')
+            ->assertOk()
+            ->assertJsonCount(1, 'data.data');
+        $this->getJson('/api/course-enrollments/' . $enrollment->id)->assertOk();
+
+        $this->postJson('/api/lessons', [
+            'course_id' => $course->id,
+            'title' => 'Created by active admin',
+            'status' => 'draft',
+        ])->assertCreated();
+        $this->patchJson('/api/lessons/' . $lesson->id, [
+            'title' => 'Updated by active admin',
+        ])->assertOk();
+        $this->postJson('/api/course-enrollments', [
+            'course_id' => $course->id,
+            'student_profile_id' => $secondStudent->id,
+        ])->assertCreated();
+        $this->patchJson('/api/course-enrollments/' . $enrollment->id, [
+            'payment_status' => 'paid',
+            'amount_paid' => 10,
+        ])->assertOk();
+
+        $this->authenticate($this->createUserWithRole('super-admin'));
+        $this->getJson('/api/lessons')->assertOk();
+        $this->getJson('/api/course-enrollments')->assertOk();
+        $this->patchJson('/api/lessons/' . $lesson->id, [
+            'title' => 'Updated by super admin',
+        ])->assertOk();
+        $this->patchJson('/api/course-enrollments/' . $enrollment->id, [
+            'payment_status' => 'paid',
+            'amount_paid' => 15,
+        ])->assertOk();
+    }
+
+    public function test_institution_admin_enrollment_list_and_show_exclude_existing_cross_institution_records(): void
+    {
+        $firstInstitution = $this->createInstitution('ENROLLMENT-TENANT-A');
+        $secondInstitution = $this->createInstitution('ENROLLMENT-TENANT-B');
+        [, $firstTeacher] = $this->createTeacher($firstInstitution);
+        [, $secondTeacher] = $this->createTeacher($secondInstitution);
+        [, $firstStudent] = $this->createStudent($firstInstitution);
+        [, $secondStudent] = $this->createStudent($secondInstitution);
+        $adminUser = $this->createInstitutionAdmin($firstInstitution);
+        $firstCourse = $this->createCourse($firstInstitution, $firstTeacher, 'enrollment-tenant-a');
+        $secondCourse = $this->createCourse($secondInstitution, $secondTeacher, 'enrollment-tenant-b');
+
+        $validEnrollment = $this->createEnrollment($firstCourse, $firstStudent);
+        $courseScopedCrossTenantEnrollment = $this->createEnrollment(
+            $firstCourse,
+            $secondStudent
+        );
+        $studentScopedCrossTenantEnrollment = $this->createEnrollment(
+            $secondCourse,
+            $firstStudent
+        );
+
+        $this->authenticate($adminUser);
+
+        $this->getJson('/api/course-enrollments')
+            ->assertOk()
+            ->assertJsonCount(1, 'data.data')
+            ->assertJsonPath('data.data.0.id', $validEnrollment->id);
+
+        $this->getJson('/api/course-enrollments/' . $validEnrollment->id)->assertOk();
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/course-enrollments/' . $courseScopedCrossTenantEnrollment->id),
+            'institution admin reading enrollment with a foreign student'
+        );
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/course-enrollments/' . $studentScopedCrossTenantEnrollment->id),
+            'institution admin reading enrollment for a foreign course'
+        );
+
+        $this->authenticate($this->createUserWithRole('super-admin'));
+        $this->getJson('/api/course-enrollments')
+            ->assertOk()
+            ->assertJsonCount(3, 'data.data');
+        $this->getJson('/api/course-enrollments/' . $courseScopedCrossTenantEnrollment->id)
+            ->assertOk();
+    }
+
+    public function test_enrollment_creation_and_update_require_matching_institutions_for_admins_and_super_admins(): void
+    {
+        $firstInstitution = $this->createInstitution('ENROLLMENT-WRITE-A');
+        $secondInstitution = $this->createInstitution('ENROLLMENT-WRITE-B');
+        [, $firstTeacher] = $this->createTeacher($firstInstitution);
+        [, $secondTeacher] = $this->createTeacher($secondInstitution);
+        [, $firstStudent] = $this->createStudent($firstInstitution);
+        [, $secondStudent] = $this->createStudent($secondInstitution);
+        [, $thirdStudent] = $this->createStudent($firstInstitution);
+        [, $fourthStudent] = $this->createStudent($firstInstitution);
+        $adminUser = $this->createInstitutionAdmin($firstInstitution);
+        $firstCourse = $this->createCourse($firstInstitution, $firstTeacher, 'enrollment-write-a');
+        $secondCourse = $this->createCourse($secondInstitution, $secondTeacher, 'enrollment-write-b');
+        $enrollment = $this->createEnrollment($firstCourse, $firstStudent);
+
+        $this->authenticate($adminUser);
+
+        $this->postJson('/api/course-enrollments', [
+            'course_id' => $firstCourse->id,
+            'student_profile_id' => $secondStudent->id,
+        ])->assertUnprocessable();
+        $this->patchJson('/api/course-enrollments/' . $enrollment->id, [
+            'student_profile_id' => $secondStudent->id,
+        ])->assertUnprocessable();
+
+        $this->postJson('/api/course-enrollments', [
+            'course_id' => $firstCourse->id,
+            'student_profile_id' => $thirdStudent->id,
+        ])->assertCreated();
+        $this->patchJson('/api/course-enrollments/' . $enrollment->id, [
+            'payment_status' => 'paid',
+            'amount_paid' => 12,
+        ])->assertOk();
+
+        $superAdmin = $this->createUserWithRole('super-admin');
+        $this->authenticate($superAdmin);
+
+        $this->postJson('/api/course-enrollments', [
+            'course_id' => $firstCourse->id,
+            'student_profile_id' => $secondStudent->id,
+        ])->assertUnprocessable();
+        $this->patchJson('/api/course-enrollments/' . $enrollment->id, [
+            'course_id' => $secondCourse->id,
+        ])->assertUnprocessable();
+
+        $this->assertDatabaseHas('course_enrollments', [
+            'id' => $enrollment->id,
+            'course_id' => $firstCourse->id,
+            'student_profile_id' => $firstStudent->id,
+        ]);
+
+        $this->postJson('/api/course-enrollments', [
+            'course_id' => $firstCourse->id,
+            'student_profile_id' => $fourthStudent->id,
+        ])->assertCreated();
+        $this->patchJson('/api/course-enrollments/' . $enrollment->id, [
+            'payment_status' => 'paid',
+            'amount_paid' => 15,
+        ])->assertOk();
     }
 
     private function createInstitution(string $code): Institution
@@ -1229,6 +2298,338 @@ class ImmediateSecurityFixesTest extends TestCase
             'id' => $draftLessonResource->id,
             'status' => 'active',
         ]);
+    }
+
+    public function test_legacy_cross_institution_enrollments_are_hidden_and_denied_to_students(): void
+    {
+        $firstInstitution = $this->createInstitution('LEGACY-ENROLLMENT-A');
+        $secondInstitution = $this->createInstitution('LEGACY-ENROLLMENT-B');
+        [, $firstTeacher] = $this->createTeacher($firstInstitution);
+        [, $secondTeacher] = $this->createTeacher($secondInstitution);
+        [$studentUser, $student] = $this->createStudent($firstInstitution);
+
+        $firstCourse = $this->createCourse(
+            $firstInstitution,
+            $firstTeacher,
+            'legacy-enrollment-valid-course'
+        );
+        $secondCourse = $this->createCourse(
+            $secondInstitution,
+            $secondTeacher,
+            'legacy-enrollment-foreign-course'
+        );
+        $firstLesson = $this->createLesson($firstCourse, 'Valid lesson');
+        $foreignLesson = $this->createLesson($secondCourse, 'Foreign lesson');
+        $foreignProgressLesson = $this->createLesson(
+            $secondCourse,
+            'Foreign progress mutation lesson'
+        );
+
+        $validEnrollment = $this->createEnrollment($firstCourse, $student);
+        $legacyEnrollment = $this->createEnrollment($secondCourse, $student);
+        $validProgress = $this->createProgress($validEnrollment, $firstLesson);
+        $this->createProgress($legacyEnrollment, $foreignLesson);
+
+        $firstQuiz = Quiz::create([
+            'course_id' => $firstCourse->id,
+            'teacher_profile_id' => $firstTeacher->id,
+            'title' => 'Valid course quiz',
+            'total_marks' => 1,
+            'passing_marks' => 1,
+            'status' => 'published',
+        ]);
+        $foreignQuiz = Quiz::create([
+            'course_id' => $secondCourse->id,
+            'teacher_profile_id' => $secondTeacher->id,
+            'title' => 'Foreign course quiz',
+            'total_marks' => 1,
+            'passing_marks' => 1,
+            'status' => 'published',
+        ]);
+        $validAttempt = QuizAttempt::create([
+            'quiz_id' => $firstQuiz->id,
+            'student_profile_id' => $student->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinute(),
+            'total_marks' => 1,
+            'marks_obtained' => 0,
+            'percentage' => 0,
+            'result_status' => 'pending',
+            'status' => 'in_progress',
+        ]);
+        QuizAttempt::create([
+            'quiz_id' => $foreignQuiz->id,
+            'student_profile_id' => $student->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinute(),
+            'submitted_at' => now(),
+            'total_marks' => 1,
+            'marks_obtained' => 1,
+            'percentage' => 100,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+
+        $validAssignment = $this->createAssignment(
+            $firstCourse,
+            $firstTeacher,
+            'Valid course assignment'
+        );
+        $foreignAssignment = $this->createAssignment(
+            $secondCourse,
+            $secondTeacher,
+            'Foreign course assignment'
+        );
+        $secondForeignAssignment = $this->createAssignment(
+            $secondCourse,
+            $secondTeacher,
+            'Foreign course assignment for mutation'
+        );
+        $validSubmission = $this->createSubmission($validAssignment, $student);
+        $this->createSubmission($foreignAssignment, $student);
+
+        $this->authenticate($studentUser);
+
+        $this->getJson('/api/student-dashboard/' . $student->id)
+            ->assertOk()
+            ->assertJsonCount(1, 'data.enrolled_courses')
+            ->assertJsonPath('data.enrolled_courses.0.id', $validEnrollment->id);
+        $this->getJson('/api/lesson-progress')
+            ->assertOk()
+            ->assertJsonCount(1, 'data.data')
+            ->assertJsonPath('data.data.0.id', $validProgress->id);
+        $this->getJson('/api/quiz-attempts')
+            ->assertOk()
+            ->assertJsonCount(1, 'data.data')
+            ->assertJsonPath('data.data.0.id', $validAttempt->id);
+        $this->getJson('/api/assignment-submissions')
+            ->assertOk()
+            ->assertJsonCount(1, 'data.data')
+            ->assertJsonPath('data.data.0.id', $validSubmission->id);
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/student-courses/' . $secondCourse->id . '/lessons'),
+            'student listing lessons for a course with a legacy mismatched enrollment'
+        );
+        $this->assertForbiddenResponse(
+            $this->getJson(
+                '/api/student-courses/' .
+                    $secondCourse->id .
+                    '/lessons/' .
+                    $foreignLesson->id
+            ),
+            'student reading a lesson for a course with a legacy mismatched enrollment'
+        );
+        $this->assertForbiddenResponse(
+            $this->postJson('/api/lesson-progress', [
+                'course_enrollment_id' => $legacyEnrollment->id,
+                'lesson_id' => $foreignProgressLesson->id,
+                'status' => 'in_progress',
+                'progress_percentage' => 20,
+            ]),
+            'student creating progress for a legacy mismatched enrollment'
+        );
+        $this->assertForbiddenResponse(
+            $this->postJson('/api/quiz-attempts', [
+                'quiz_id' => $foreignQuiz->id,
+                'student_profile_id' => $student->id,
+            ]),
+            'student creating a quiz attempt through a legacy mismatched enrollment'
+        );
+        $this->assertForbiddenResponse(
+            $this->postJson('/api/assignment-submissions', [
+                'assignment_id' => $secondForeignAssignment->id,
+                'student_profile_id' => $student->id,
+                'submission_text' => 'A response for the foreign course.',
+                'status' => 'submitted',
+            ]),
+            'student submitting an assignment through a legacy mismatched enrollment'
+        );
+    }
+
+    public function test_institution_admin_assignment_access_is_tenant_scoped_and_super_admin_access_is_preserved(): void
+    {
+        $firstInstitution = $this->createInstitution('ASSIGNMENT-AUTH-A');
+        $secondInstitution = $this->createInstitution('ASSIGNMENT-AUTH-B');
+        [, $firstTeacher] = $this->createTeacher($firstInstitution);
+        [$secondTeacherUser, $secondTeacher] = $this->createTeacher($secondInstitution);
+        $adminUser = $this->createInstitutionAdmin($firstInstitution);
+        $firstCourse = $this->createCourse($firstInstitution, $firstTeacher, 'assignment-auth-a');
+        $secondCourse = $this->createCourse($secondInstitution, $secondTeacher, 'assignment-auth-b');
+        $localAssignment = $this->createAssignment(
+            $firstCourse,
+            $firstTeacher,
+            'Local assignment'
+        );
+        $foreignAssignment = $this->createAssignment(
+            $secondCourse,
+            $secondTeacher,
+            'Foreign assignment'
+        );
+
+        $this->authenticate($adminUser);
+
+        $this->getJson('/api/assignments')
+            ->assertOk()
+            ->assertJsonFragment(['id' => $localAssignment->id])
+            ->assertJsonMissingExact(['id' => $foreignAssignment->id]);
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/assignments/' . $foreignAssignment->id),
+            'institution admin reading a foreign assignment'
+        );
+        $this->assertForbiddenResponse(
+            $this->patchJson('/api/assignments/' . $foreignAssignment->id, [
+                'title' => 'Unauthorized changed title',
+            ]),
+            'institution admin updating a foreign assignment'
+        );
+        $this->assertForbiddenResponse(
+            $this->deleteJson('/api/assignments/' . $foreignAssignment->id),
+            'institution admin deleting a foreign assignment'
+        );
+        $this->assertDatabaseHas('assignments', [
+            'id' => $foreignAssignment->id,
+            'title' => 'Foreign assignment',
+            'deleted_at' => null,
+        ]);
+
+        $this->getJson('/api/assignments/' . $localAssignment->id)->assertOk();
+        $this->patchJson('/api/assignments/' . $localAssignment->id, [
+            'title' => 'Updated local assignment',
+        ])->assertOk();
+        $this->deleteJson('/api/assignments/' . $localAssignment->id)->assertOk();
+
+        $this->authenticate($secondTeacherUser);
+        $this->getJson('/api/assignments/' . $foreignAssignment->id)->assertOk();
+        $this->patchJson('/api/assignments/' . $foreignAssignment->id, [
+            'title' => 'Updated by course teacher',
+        ])->assertOk();
+
+        $this->authenticate($this->createUserWithRole('super-admin'));
+        $this->getJson('/api/assignments/' . $foreignAssignment->id)->assertOk();
+        $this->patchJson('/api/assignments/' . $foreignAssignment->id, [
+            'title' => 'Updated by super admin',
+        ])->assertOk();
+    }
+
+    public function test_inactive_institution_admin_cannot_read_or_grade_assessments(): void
+    {
+        $institution = $this->createInstitution('INACTIVE-ASSESSMENT-ADMIN');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [, $student] = $this->createStudent($institution);
+        $adminUser = $this->createInstitutionAdmin($institution);
+        $course = $this->createCourse($institution, $teacher, 'inactive-assessment-admin');
+        $lesson = $this->createLesson($course, 'Protected assessment lesson');
+        $assignment = $this->createAssignment($course, $teacher, 'Protected assignment');
+        $submission = $this->createSubmission($assignment, $student);
+        $quiz = Quiz::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'teacher_profile_id' => $teacher->id,
+            'title' => 'Protected manual quiz',
+            'total_marks' => 1,
+            'passing_marks' => 1,
+            'status' => 'published',
+        ]);
+        $manualQuestion = QuestionBank::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'question_text' => 'Explain the answer.',
+            'question_type' => 'short_answer',
+            'marks' => 1,
+            'status' => 'active',
+        ]);
+        QuizQuestion::create([
+            'quiz_id' => $quiz->id,
+            'question_bank_id' => $manualQuestion->id,
+            'marks' => 1,
+            'sort_order' => 1,
+        ]);
+        $attempt = QuizAttempt::create([
+            'quiz_id' => $quiz->id,
+            'student_profile_id' => $student->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinute(),
+            'submitted_at' => now(),
+            'total_marks' => 1,
+            'marks_obtained' => 0,
+            'percentage' => 0,
+            'result_status' => 'pending',
+            'status' => 'submitted',
+        ]);
+        $answer = QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $manualQuestion->id,
+            'answer_text' => 'Student response.',
+            'marks_obtained' => 0,
+        ]);
+
+        InstitutionUser::where('user_id', $adminUser->id)
+            ->update(['status' => 'inactive']);
+        $this->authenticate($adminUser);
+
+        $this->assertForbiddenResponse($this->getJson('/api/assignments'), 'inactive admin listing assignments');
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/assignments/' . $assignment->id),
+            'inactive admin reading an assignment'
+        );
+        $this->assertForbiddenResponse(
+            $this->patchJson('/api/assignments/' . $assignment->id, [
+                'title' => 'Unauthorized assignment update',
+            ]),
+            'inactive admin updating an assignment'
+        );
+        $this->assertForbiddenResponse(
+            $this->deleteJson('/api/assignments/' . $assignment->id),
+            'inactive admin deleting an assignment'
+        );
+        $this->assertForbiddenResponse($this->getJson('/api/quizzes'), 'inactive admin listing quizzes');
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/quizzes/' . $quiz->id),
+            'inactive admin reading a quiz'
+        );
+        $this->assertForbiddenResponse(
+            $this->patchJson('/api/quizzes/' . $quiz->id, ['title' => 'Unauthorized update']),
+            'inactive admin updating a quiz'
+        );
+        $this->assertForbiddenResponse($this->getJson('/api/quiz-attempts'), 'inactive admin listing attempts');
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/quiz-attempts/' . $attempt->id),
+            'inactive admin reading a quiz attempt'
+        );
+        $this->assertForbiddenResponse(
+            $this->deleteJson('/api/quiz-attempts/' . $attempt->id),
+            'inactive admin deleting a quiz attempt'
+        );
+        $this->assertForbiddenResponse($this->getJson('/api/quiz-answers'), 'inactive admin listing quiz answers');
+        $this->assertForbiddenResponse(
+            $this->patchJson('/api/quiz-answers/' . $answer->id, ['marks_obtained' => 1]),
+            'inactive admin grading a manual quiz answer'
+        );
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/assignment-submissions'),
+            'inactive admin listing assignment submissions'
+        );
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/assignment-submissions/' . $submission->id),
+            'inactive admin reading an assignment submission'
+        );
+
+        $this->assertNull($answer->fresh()->manually_graded_at);
+
+        InstitutionUser::where('user_id', $adminUser->id)
+            ->update(['status' => 'active']);
+        $this->authenticate($adminUser);
+
+        $this->getJson('/api/assignments')->assertOk();
+        $this->getJson('/api/quizzes')->assertOk();
+        $this->getJson('/api/quiz-attempts')->assertOk();
+        $this->getJson('/api/quiz-answers')->assertOk();
+        $this->getJson('/api/assignment-submissions')->assertOk();
+        $this->patchJson('/api/quiz-answers/' . $answer->id, [
+            'marks_obtained' => 1,
+        ])->assertOk();
+        $this->assertNotNull($answer->fresh()->manually_graded_at);
     }
 
     private function createEvaluation(

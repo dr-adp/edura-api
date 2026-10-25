@@ -3,18 +3,26 @@
 namespace App\Http\Controllers\Api;
 
 use App\Models\Lesson;
+use App\Models\Assignment;
+use App\Models\Quiz;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Api\BaseApiController;
 use App\Models\User;
 use App\Models\Course;
 use App\Models\InstitutionUser;
+use App\Services\CourseEnrollmentService;
 use Illuminate\Support\Facades\Auth;
 use App\Http\Requests\StoreLessonRequest;
 use App\Http\Requests\UpdateLessonRequest;
 
 class LessonController extends BaseApiController
 {
+    public function __construct(
+        private CourseEnrollmentService $courseEnrollmentService
+    ) {
+    }
+
     public function index(): JsonResponse
     {
         /** @var User $user */
@@ -35,7 +43,9 @@ class LessonController extends BaseApiController
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (!$institutionUser) {
 
@@ -151,6 +161,12 @@ class LessonController extends BaseApiController
             $validated
         );
 
+        if ($lesson->status === 'published') {
+            $this->courseEnrollmentService->recalculateCourseEnrollments(
+                (int) $lesson->course_id
+            );
+        }
+
         return $this->successResponse(
             $lesson->load([
                 'course',
@@ -202,6 +218,36 @@ class LessonController extends BaseApiController
             course: $course
         );
 
+        $originalCourseId = (int) $lesson->course_id;
+        $targetCourseId = (int) $course->id;
+        $courseChanged = $originalCourseId !== $targetCourseId;
+
+        if ($courseChanged) {
+            $hasIncompatibleQuiz = Quiz::where('lesson_id', $lesson->id)
+                ->where('course_id', '!=', $targetCourseId)
+                ->exists();
+            $hasIncompatibleAssignment = Assignment::where('lesson_id', $lesson->id)
+                ->where('course_id', '!=', $targetCourseId)
+                ->exists();
+
+            if ($hasIncompatibleQuiz || $hasIncompatibleAssignment) {
+                abort(
+                    422,
+                    'Attached quizzes and assignments must belong to the target course before moving this lesson.'
+                );
+            }
+
+            if (
+                ! array_key_exists('course_section_id', $validated) &&
+                $lesson->course_section_id !== null &&
+                ! $course->sections()
+                    ->whereKey($lesson->course_section_id)
+                    ->exists()
+            ) {
+                $validated['course_section_id'] = null;
+            }
+        }
+
         /*
     |--------------------------------------------------------------------------
     | Course Section Validation
@@ -228,9 +274,34 @@ class LessonController extends BaseApiController
             }
         }
 
+        $wasPublished = $lesson->status === 'published';
+
         $lesson->update(
             $validated
         );
+
+        $isPublished = $lesson->status === 'published';
+        $newCourseId = (int) $lesson->course_id;
+        $publishedLessonSetChanged = $wasPublished !== $isPublished
+            || ($wasPublished && $isPublished && $originalCourseId !== $newCourseId);
+
+        if ($publishedLessonSetChanged) {
+            $affectedCourseIds = [];
+
+            if ($wasPublished) {
+                $affectedCourseIds[] = $originalCourseId;
+            }
+
+            if ($isPublished) {
+                $affectedCourseIds[] = $newCourseId;
+            }
+
+            foreach (array_unique($affectedCourseIds) as $courseId) {
+                $this->courseEnrollmentService->recalculateCourseEnrollments(
+                    (int) $courseId
+                );
+            }
+        }
 
         return $this->successResponse(
             $lesson
@@ -254,7 +325,14 @@ class LessonController extends BaseApiController
             lesson: $lesson
         );
 
+        $courseId = (int) $lesson->course_id;
+        $wasPublished = $lesson->status === 'published';
+
         $lesson->delete();
+
+        if ($wasPublished) {
+            $this->courseEnrollmentService->recalculateCourseEnrollments($courseId);
+        }
 
         return $this->successResponse(
             null,
@@ -288,7 +366,9 @@ class LessonController extends BaseApiController
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (!$institutionUser) {
 

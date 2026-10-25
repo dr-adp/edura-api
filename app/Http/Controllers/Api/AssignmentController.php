@@ -27,8 +27,13 @@ class AssignmentController extends BaseApiController
             'teacherProfile.user'
         ]);
 
-        // Teacher: only own assignments
-        if ($user->hasRole('teacher')) {
+        if ($user->hasRole('institution-admin')) {
+            $institutionUser = $this->institutionUserFor($user);
+
+            $query->whereHas('course', function ($courseQuery) use ($institutionUser) {
+                $courseQuery->where('institution_id', $institutionUser->institution_id);
+            });
+        } elseif ($user->hasRole('teacher')) {
 
             $teacherProfile = $user->teacherProfile;
 
@@ -40,6 +45,8 @@ class AssignmentController extends BaseApiController
                 'teacher_profile_id',
                 $teacherProfile->id
             );
+        } elseif (!$user->hasRole('super-admin')) {
+            abort(403, 'Unauthorized role.');
         }
 
         $assignments = $query
@@ -63,25 +70,7 @@ class AssignmentController extends BaseApiController
             $validated['course_id']
         );
 
-        // Institution Admin
-        if ($user->hasRole('institution-admin')) {
-
-            $institutionUser = InstitutionUser::where(
-                'user_id',
-                $user->id
-            )->first();
-
-            if (
-                !$institutionUser ||
-                $course->institution_id !== $institutionUser->institution_id
-            ) {
-
-                abort(
-                    403,
-                    'Unauthorized: Course does not belong to your institution.'
-                );
-            }
-        }
+        $this->authorizeCourseAccess($course, $user);
 
         // Teacher
         if ($user->hasRole('teacher')) {
@@ -129,6 +118,8 @@ class AssignmentController extends BaseApiController
 
     public function show(Assignment $assignment): JsonResponse
     {
+        $this->authorizeAssignmentAccess($assignment, Auth::user());
+
         return $this->successResponse(
             $assignment->load([
                 'course',
@@ -148,23 +139,14 @@ class AssignmentController extends BaseApiController
         /** @var User $user */
         $user = Auth::user();
 
-        if ($user->hasRole('teacher')) {
-
-            $teacherProfile = $user->teacherProfile;
-
-            if (
-                !$teacherProfile ||
-                $assignment->teacher_profile_id !== $teacherProfile->id
-            ) {
-
-                abort(
-                    403,
-                    'Unauthorized.'
-                );
-            }
-        }
+        $this->authorizeAssignmentAccess($assignment, $user);
 
         $validated = $request->validated();
+
+        $targetCourse = Course::findOrFail(
+            $validated['course_id'] ?? $assignment->course_id
+        );
+        $this->authorizeCourseAccess($targetCourse, $user);
 
         $assignment->fill($validated);
         $assignment->save();
@@ -187,21 +169,7 @@ class AssignmentController extends BaseApiController
         /** @var User $user */
         $user = Auth::user();
 
-        if ($user->hasRole('teacher')) {
-
-            $teacherProfile = $user->teacherProfile;
-
-            if (
-                !$teacherProfile ||
-                $assignment->teacher_profile_id !== $teacherProfile->id
-            ) {
-
-                abort(
-                    403,
-                    'Unauthorized.'
-                );
-            }
-        }
+        $this->authorizeAssignmentAccess($assignment, $user);
 
         $assignment->delete();
 
@@ -209,5 +177,88 @@ class AssignmentController extends BaseApiController
             null,
             'Assignment deleted successfully.'
         );
+    }
+
+    private function authorizeAssignmentAccess(Assignment $assignment, User $user): void
+    {
+        $assignment->loadMissing('course');
+
+        if ($user->hasRole('super-admin')) {
+            return;
+        }
+
+        if ($user->hasRole('institution-admin')) {
+            $institutionUser = $this->institutionUserFor($user);
+
+            if (
+                $assignment->course &&
+                (int) $assignment->course->institution_id ===
+                    (int) $institutionUser->institution_id
+            ) {
+                return;
+            }
+
+            abort(403, 'Unauthorized institution access.');
+        }
+
+        if ($user->hasRole('teacher')) {
+            $teacherProfile = $user->teacherProfile;
+
+            if (
+                $teacherProfile &&
+                (int) $assignment->teacher_profile_id === (int) $teacherProfile->id
+            ) {
+                return;
+            }
+
+            abort(403, 'Unauthorized assignment access.');
+        }
+
+        abort(403, 'Unauthorized role.');
+    }
+
+    private function authorizeCourseAccess(Course $course, User $user): void
+    {
+        if ($user->hasRole('super-admin')) {
+            return;
+        }
+
+        if ($user->hasRole('institution-admin')) {
+            $institutionUser = $this->institutionUserFor($user);
+
+            if ((int) $course->institution_id === (int) $institutionUser->institution_id) {
+                return;
+            }
+
+            abort(403, 'Unauthorized: Course does not belong to your institution.');
+        }
+
+        if ($user->hasRole('teacher')) {
+            $teacherProfile = $user->teacherProfile;
+
+            if (
+                $teacherProfile &&
+                (int) $course->teacher_profile_id === (int) $teacherProfile->id
+            ) {
+                return;
+            }
+
+            abort(403, 'Unauthorized: You can access assignments only for your courses.');
+        }
+
+        abort(403, 'Unauthorized role.');
+    }
+
+    private function institutionUserFor(User $user): InstitutionUser
+    {
+        $institutionUser = InstitutionUser::where('user_id', $user->id)
+            ->where('status', 'active')
+            ->first();
+
+        if ($institutionUser) {
+            return $institutionUser;
+        }
+
+        abort(403, 'Active institution membership required.');
     }
 }

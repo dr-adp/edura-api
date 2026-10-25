@@ -38,6 +38,10 @@ class CourseEnrollmentController extends BaseApiController
             'studentProfile.batch',
         ]);
 
+        if (!$user->hasRole('super-admin')) {
+            $query->institutionallyConsistent();
+        }
+
         if ($user->hasRole('super-admin')) {
 
             // Full access
@@ -47,7 +51,9 @@ class CourseEnrollmentController extends BaseApiController
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (!$institutionUser) {
 
@@ -59,6 +65,12 @@ class CourseEnrollmentController extends BaseApiController
 
             $query->whereHas(
                 'course',
+                fn($q) => $q->where(
+                    'institution_id',
+                    $institutionUser->institution_id
+                )
+            )->whereHas(
+                'studentProfile',
                 fn($q) => $q->where(
                     'institution_id',
                     $institutionUser->institution_id
@@ -318,6 +330,8 @@ class CourseEnrollmentController extends BaseApiController
 
         $courseEnrollment->save();
 
+        $this->service->recalculateProgress($courseEnrollment);
+
         return $this->successResponse(
             $courseEnrollment
                 ->fresh()
@@ -417,12 +431,18 @@ class CourseEnrollmentController extends BaseApiController
             'studentProfile',
         ]);
 
+        if (!$enrollment->hasConsistentInstitutions()) {
+            abort(403, 'Course and student must belong to the same institution.');
+        }
+
         if ($user->hasRole('institution-admin')) {
 
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (
                 !$institutionUser ||
@@ -507,19 +527,13 @@ class CourseEnrollmentController extends BaseApiController
         /** @var User $user */
         $user = Auth::user();
 
+        $this->service->ensureCourseAndStudentShareInstitution(
+            $course,
+            $studentProfile
+        );
+
         if ($user->hasRole('super-admin')) {
             return;
-        }
-
-        if (
-            (int) $course->institution_id !==
-            (int) $studentProfile->institution_id
-        ) {
-
-            abort(
-                422,
-                'Course and student must belong to the same institution.'
-            );
         }
 
         if ($user->hasRole('institution-admin')) {
@@ -527,7 +541,9 @@ class CourseEnrollmentController extends BaseApiController
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (
                 !$institutionUser ||

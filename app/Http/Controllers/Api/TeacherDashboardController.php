@@ -33,7 +33,9 @@ class TeacherDashboardController extends Controller
             'department',
             'courses' => function ($query) {
                 $query->withCount([
-                    'enrollments as total_students',
+                    'enrollments as total_students' => function ($enrollments) {
+                        $enrollments->institutionallyConsistent();
+                    },
                     'lessons as total_lessons',
                     'assignments as total_assignments',
                     'quizzes as total_quizzes',
@@ -52,14 +54,17 @@ class TeacherDashboardController extends Controller
 
         $pendingEvaluations = Assignment::where('teacher_profile_id', $teacherProfile->id)
             ->whereHas('submissions', function ($query) {
-                $query->where('status', 'submitted');
+                $query->institutionallyConsistent()
+                    ->where('status', 'submitted');
             })
             ->withCount(['submissions as pending_count' => function ($query) {
-                $query->where('status', 'submitted');
+                $query->institutionallyConsistent()
+                    ->where('status', 'submitted');
             }])
             ->get();
 
         $recentEnrollments = CourseEnrollment::whereIn('course_id', $teacherProfile->courses->pluck('id'))
+            ->institutionallyConsistent()
             ->with(['studentProfile.user', 'course'])
             ->latest()
             ->take(10)
@@ -85,9 +90,12 @@ class TeacherDashboardController extends Controller
 
         $courses = Course::where('teacher_profile_id', $teacherProfile->id)
             ->withCount([
-                'enrollments as total_students',
+                'enrollments as total_students' => function ($query) {
+                    $query->institutionallyConsistent();
+                },
                 'enrollments as completed_students' => function ($query) {
-                    $query->where('status', 'completed');
+                    $query->institutionallyConsistent()
+                        ->where('status', 'completed');
                 },
                 'lessons as total_lessons',
                 'assignments as total_assignments',
@@ -112,6 +120,7 @@ class TeacherDashboardController extends Controller
         }
 
         $enrollments = CourseEnrollment::where('course_id', $course->id)
+            ->institutionallyConsistent()
             ->with([
                 'studentProfile.user',
                 'studentProfile.batch',
@@ -134,15 +143,20 @@ class TeacherDashboardController extends Controller
             abort(403, 'Unauthorized: This course is not assigned to you.');
         }
 
-        $totalEnrollments = CourseEnrollment::where('course_id', $course->id)->count();
+        $totalEnrollments = CourseEnrollment::where('course_id', $course->id)
+            ->institutionallyConsistent()
+            ->count();
         $completedEnrollments = CourseEnrollment::where('course_id', $course->id)
+            ->institutionallyConsistent()
             ->where('status', 'completed')
             ->count();
         $activeEnrollments = CourseEnrollment::where('course_id', $course->id)
+            ->institutionallyConsistent()
             ->where('status', 'active')
             ->count();
 
         $averageProgress = CourseEnrollment::where('course_id', $course->id)
+            ->institutionallyConsistent()
             ->avg('progress_percentage');
 
         $totalAssignments = Assignment::where('course_id', $course->id)->count();

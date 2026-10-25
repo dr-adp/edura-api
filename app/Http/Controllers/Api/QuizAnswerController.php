@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\InstitutionUser;
+use App\Models\QuestionBank;
 use App\Models\QuestionOption;
 use App\Models\QuizAnswer;
 use App\Models\QuizAttempt;
@@ -283,6 +284,19 @@ class QuizAnswerController extends Controller
             ]);
         }
 
+        if (
+            ! $this->isStudentScoped($user) &&
+            array_key_exists('marks_obtained', $validated) &&
+            $validated['marks_obtained'] !== null &&
+            in_array(
+                $quizAnswer->questionBank?->question_type,
+                QuestionBank::MANUAL_QUESTION_TYPES,
+                true
+            )
+        ) {
+            $validated['manually_graded_at'] = now();
+        }
+
         $quizAnswer->update(
             $validated
         );
@@ -372,6 +386,12 @@ class QuizAnswerController extends Controller
             return;
         }
 
+        $query->whereHas(
+            'quizAttempt',
+            fn (Builder $attemptQuery) => $attemptQuery
+                ->institutionallyConsistent()
+        );
+
         /*
         |--------------------------------------------------------------------------
         | Institution Admin Scope
@@ -381,7 +401,9 @@ class QuizAnswerController extends Controller
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (! $institutionUser) {
                 abort(
@@ -546,6 +568,7 @@ class QuizAnswerController extends Controller
         $quizAnswer->loadMissing([
             'quizAttempt.quiz.course',
             'quizAttempt.studentProfile',
+            'questionBank',
         ]);
 
         /*
@@ -582,17 +605,13 @@ class QuizAnswerController extends Controller
         | Closed Attempt Lock
         |--------------------------------------------------------------------------
         */
-        if (
-            ! $user->hasRole('super-admin') &&
-            in_array(
-                $quizAnswer->quizAttempt->status,
-                [
-                    'evaluated',
-                    'cancelled',
-                ],
-                true
-            )
-        ) {
+        $attemptStatus = $quizAnswer->quizAttempt->status;
+        $isClosedAttempt = $attemptStatus === 'cancelled' || (
+            $attemptStatus === 'evaluated' &&
+            ! $this->isPendingManualAnswer($quizAnswer)
+        );
+
+        if (! $user->hasRole('super-admin') && $isClosedAttempt) {
 
             abort(
                 403,
@@ -620,6 +639,10 @@ class QuizAnswerController extends Controller
             return;
         }
 
+        if (!$attempt->hasConsistentInstitutions()) {
+            abort(403, 'Course and student must belong to the same institution.');
+        }
+
         /*
         |--------------------------------------------------------------------------
         | Institution Admin Access
@@ -629,7 +652,9 @@ class QuizAnswerController extends Controller
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if ($this->institutionCanAccessAttempt($attempt, $institutionUser)) {
 
@@ -801,6 +826,7 @@ class QuizAnswerController extends Controller
 
             $isEnrolled = $studentProfile
                 ->courseEnrollments()
+                ->institutionallyConsistent()
                 ->where(
                     'course_id',
                     $attempt->quiz->course_id
@@ -907,6 +933,15 @@ class QuizAnswerController extends Controller
                 'institution-admin',
                 'teacher',
             ]);
+    }
+
+    private function isPendingManualAnswer(QuizAnswer $answer): bool
+    {
+        return in_array(
+            $answer->questionBank?->question_type,
+            QuestionBank::MANUAL_QUESTION_TYPES,
+            true
+        ) && $answer->manually_graded_at === null;
     }
 
     private function resolveQuizQuestion(
@@ -1123,14 +1158,7 @@ class QuizAnswerController extends Controller
 
                 $type = $answer->questionBank?->question_type;
 
-                return in_array(
-                    $type,
-                    [
-                        'short_answer',
-                        'long_answer',
-                        'fill_blank',
-                    ]
-                );
+                return in_array($type, QuestionBank::MANUAL_QUESTION_TYPES, true);
             });
 
         /*
@@ -1139,24 +1167,11 @@ class QuizAnswerController extends Controller
     |--------------------------------------------------------------------------
     */
         $pendingManualEvaluation = $attempt->answers
-            ->contains(function ($answer) {
+            ->contains(fn ($answer) => $this->isPendingManualAnswer($answer));
 
-                $type = $answer->questionBank?->question_type;
-
-                if (! in_array(
-                    $type,
-                    [
-                        'short_answer',
-                        'long_answer',
-                        'fill_blank',
-                    ]
-                )) {
-
-                    return false;
-                }
-
-                return $answer->marks_obtained === null;
-            });
+        if ($pendingManualEvaluation) {
+            $resultStatus = 'pending';
+        }
 
         /*
     |--------------------------------------------------------------------------
@@ -1164,6 +1179,10 @@ class QuizAnswerController extends Controller
     |--------------------------------------------------------------------------
     */
         $status = $attempt->status;
+
+        if ($pendingManualEvaluation && $status === 'evaluated') {
+            $status = 'submitted';
+        }
 
         if (
             $status === 'submitted'

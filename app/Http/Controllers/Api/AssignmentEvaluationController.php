@@ -236,6 +236,12 @@ class AssignmentEvaluationController extends BaseApiController
             return;
         }
 
+        $query->whereHas(
+            'assignmentSubmission',
+            fn (Builder $submissionQuery) => $submissionQuery
+                ->institutionallyConsistent()
+        );
+
         if ($user->hasRole('institution-admin')) {
             $institutionUser = $this->institutionUserFor($user);
 
@@ -416,6 +422,10 @@ class AssignmentEvaluationController extends BaseApiController
             return;
         }
 
+        if (!$submission->hasConsistentInstitutions()) {
+            abort(403, 'Course and student must belong to the same institution.');
+        }
+
         if ($user->hasRole('institution-admin')) {
             $institutionUser = $this->institutionUserFor($user);
 
@@ -581,6 +591,7 @@ class AssignmentEvaluationController extends BaseApiController
     private function studentEnrolledInCourse(int $courseId, int $studentProfileId): bool
     {
         return CourseEnrollment::where('course_id', $courseId)
+            ->institutionallyConsistent()
             ->where('student_profile_id', $studentProfileId)
             ->whereIn('status', self::VALID_ENROLLMENT_STATUSES)
             ->exists();

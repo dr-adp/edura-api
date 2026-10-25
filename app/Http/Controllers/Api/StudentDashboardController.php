@@ -4,8 +4,11 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Assignment;
+use App\Models\AssignmentSubmission;
+use App\Models\CourseEnrollment;
 use App\Models\InstitutionUser;
 use App\Models\LiveClass;
+use App\Models\QuizAttempt;
 use App\Models\StudentProfile;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
@@ -83,6 +86,7 @@ class StudentDashboardController extends Controller
 
             $isMyStudent = $studentProfile
                 ->courseEnrollments()
+                ->institutionallyConsistent()
                 ->whereHas(
                     'course',
                     function ($query) use ($teacherProfile) {
@@ -159,11 +163,30 @@ class StudentDashboardController extends Controller
             'institution',
             'department',
             'batch',
-            'courseEnrollments.course',
             'certificates',
-            'assignmentSubmissions.assignment',
-            'quizAttempts.quiz'
         ]);
+
+        $studentProfile->setRelation(
+            'courseEnrollments',
+            CourseEnrollment::institutionallyConsistent()
+                ->where('student_profile_id', $studentProfile->id)
+                ->with('course')
+                ->get()
+        );
+        $studentProfile->setRelation(
+            'assignmentSubmissions',
+            AssignmentSubmission::institutionallyConsistent()
+                ->where('student_profile_id', $studentProfile->id)
+                ->with('assignment')
+                ->get()
+        );
+        $studentProfile->setRelation(
+            'quizAttempts',
+            QuizAttempt::institutionallyConsistent()
+                ->where('student_profile_id', $studentProfile->id)
+                ->with('quiz')
+                ->get()
+        );
 
         $enrolledCourses = $studentProfile->courseEnrollments;
 

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Models\Assignment;
 use App\Models\AssignmentSubmission;
+use App\Models\CourseEnrollment;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\Rule;
@@ -27,6 +28,10 @@ class AssignmentSubmissionController extends BaseApiController
             'studentProfile.user',
             'studentProfile.batch'
         ])->latest();
+
+        if (!$user->hasRole('super-admin')) {
+            $query->institutionallyConsistent();
+        }
 
         /*
 |--------------------------------------------------------------------------
@@ -58,23 +63,20 @@ class AssignmentSubmissionController extends BaseApiController
 */
         if ($user->hasRole('institution-admin')) {
 
-            $institutionUser = InstitutionUser::where(
-                'user_id',
-                $user->id
-            )->first();
-
-            if (!$institutionUser) {
-
-                abort(
-                    403,
-                    'Unauthorized: Institution profile not found.'
-                );
-            }
+            $institutionUser = $this->institutionUserFor($user);
 
             $query->whereHas(
                 'studentProfile',
                 function ($q) use ($institutionUser) {
 
+                    $q->where(
+                        'institution_id',
+                        $institutionUser->institution_id
+                    );
+                }
+            )->whereHas(
+                'assignment.course',
+                function ($q) use ($institutionUser) {
                     $q->where(
                         'institution_id',
                         $institutionUser->institution_id
@@ -227,12 +229,24 @@ class AssignmentSubmissionController extends BaseApiController
 
         if ($user->hasRole('student')) {
 
+            $assignment->loadMissing('course');
+
+            if (
+                !$assignment->course ||
+                (int) $assignment->course->institution_id !==
+                    (int) $studentProfile->institution_id
+            ) {
+                abort(403, 'Course and student must belong to the same institution.');
+            }
+
             $isEnrolled = $studentProfile
                 ->courseEnrollments()
+                ->institutionallyConsistent()
                 ->where(
                     'course_id',
                     $assignment->course_id
                 )
+                ->whereIn('status', ['active', 'completed'])
                 ->exists();
 
             if (!$isEnrolled) {
@@ -335,6 +349,8 @@ class AssignmentSubmissionController extends BaseApiController
             'studentProfile.batch'
         ]);
 
+        $this->ensureSubmissionInstitutionalConsistency($assignmentSubmission, $user);
+
         /*
     |--------------------------------------------------------------------------
     | Student Role
@@ -385,16 +401,13 @@ class AssignmentSubmissionController extends BaseApiController
     */
         if ($user->hasRole('institution-admin')) {
 
-            $institutionUser = InstitutionUser::where(
-                'user_id',
-                $user->id
-            )->first();
+            $institutionUser = $this->institutionUserFor($user);
 
             if (
-                !$institutionUser ||
-                $assignmentSubmission
-                ->studentProfile
-                ->institution_id !== $institutionUser->institution_id
+                (int) $assignmentSubmission->studentProfile->institution_id !==
+                    (int) $institutionUser->institution_id ||
+                (int) $assignmentSubmission->assignment->course->institution_id !==
+                    (int) $institutionUser->institution_id
             ) {
 
                 abort(
@@ -468,6 +481,12 @@ class AssignmentSubmissionController extends BaseApiController
 
         /** @var User $user */
         $user = Auth::user();
+
+        $assignmentSubmission->loadMissing([
+            'assignment.course',
+            'studentProfile',
+        ]);
+        $this->ensureSubmissionInstitutionalConsistency($assignmentSubmission, $user);
 
         /*
     |--------------------------------------------------------------------------
@@ -617,6 +636,12 @@ class AssignmentSubmissionController extends BaseApiController
         /** @var User $user */
         $user = Auth::user();
 
+        $assignmentSubmission->loadMissing([
+            'assignment.course',
+            'studentProfile',
+        ]);
+        $this->ensureSubmissionInstitutionalConsistency($assignmentSubmission, $user);
+
         /*
     |--------------------------------------------------------------------------
     | Role Protection
@@ -709,5 +734,30 @@ class AssignmentSubmissionController extends BaseApiController
         return $dueDate
             ? now()->greaterThan($dueDate)
             : false;
+    }
+
+    private function ensureSubmissionInstitutionalConsistency(
+        AssignmentSubmission $assignmentSubmission,
+        User $user
+    ): void {
+        if (
+            !$user->hasRole('super-admin') &&
+            !$assignmentSubmission->hasConsistentInstitutions()
+        ) {
+            abort(403, 'Course and student must belong to the same institution.');
+        }
+    }
+
+    private function institutionUserFor(User $user): InstitutionUser
+    {
+        $institutionUser = InstitutionUser::where('user_id', $user->id)
+            ->where('status', 'active')
+            ->first();
+
+        if ($institutionUser) {
+            return $institutionUser;
+        }
+
+        abort(403, 'Active institution membership required.');
     }
 }

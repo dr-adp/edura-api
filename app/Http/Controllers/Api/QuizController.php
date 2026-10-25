@@ -39,7 +39,9 @@ class QuizController extends BaseApiController
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (!$institutionUser) {
 
@@ -363,7 +365,9 @@ class QuizController extends BaseApiController
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (!$institutionUser) {
 

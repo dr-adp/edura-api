@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Course;
 use App\Models\CourseEnrollment;
+use App\Models\Lesson;
 use App\Models\StudentProfile;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
@@ -30,6 +31,8 @@ class StudentLearningController extends Controller
             403,
             'Unauthorized: Student profile not found.'
         );
+
+        $this->ensureCourseAndStudentShareInstitution($course, $studentProfile);
 
         $enrollmentExists = CourseEnrollment::where(
             'course_id',
@@ -61,6 +64,10 @@ class StudentLearningController extends Controller
             ->orderBy('sort_order')
             ->get();
 
+        $lessons->each(function (Lesson $lesson) use ($course) {
+            $this->clearStaleCourseSection($lesson, $course);
+        });
+
         return response()->json([
             'message' => 'Course lessons fetched successfully.',
             'data' => $lessons,
@@ -87,6 +94,8 @@ class StudentLearningController extends Controller
             403,
             'Unauthorized: Student profile not found.'
         );
+
+        $this->ensureCourseAndStudentShareInstitution($course, $studentProfile);
 
         $enrollmentExists = CourseEnrollment::where(
             'course_id',
@@ -118,6 +127,8 @@ class StudentLearningController extends Controller
             ])
             ->firstOrFail();
 
+        $this->clearStaleCourseSection($lessonModel, $course);
+
         return response()->json([
             'message' => 'Lesson fetched successfully.',
             'data' => $lessonModel,
@@ -144,6 +155,8 @@ class StudentLearningController extends Controller
             403,
             'Unauthorized: Student profile not found.'
         );
+
+        $this->ensureCourseAndStudentShareInstitution($course, $studentProfile);
 
         $enrollmentExists = CourseEnrollment::where(
             'course_id',
@@ -176,5 +189,34 @@ class StudentLearningController extends Controller
             'message' => 'Lesson resources fetched successfully.',
             'data' => $resources,
         ]);
+    }
+
+    private function clearStaleCourseSection(Lesson $lesson, Course $course): void
+    {
+        $section = $lesson->courseSection;
+
+        if (
+            $lesson->course_section_id !== null &&
+            (
+                ! $section ||
+                (int) $section->course_id !== (int) $course->id
+            )
+        ) {
+            $lesson->setAttribute('course_section_id', null);
+            $lesson->setRelation('courseSection', null);
+        }
+    }
+
+    private function ensureCourseAndStudentShareInstitution(
+        Course $course,
+        StudentProfile $studentProfile
+    ): void {
+        abort_unless(
+            $course->institution_id !== null &&
+                $studentProfile->institution_id !== null &&
+                (int) $course->institution_id === (int) $studentProfile->institution_id,
+            403,
+            'Unauthorized: Course and student must belong to the same institution.'
+        );
     }
 }

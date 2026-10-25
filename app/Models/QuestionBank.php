@@ -9,6 +9,12 @@ class QuestionBank extends Model
 {
     use HasFactory;
 
+    public const MANUAL_QUESTION_TYPES = [
+        'short_answer',
+        'long_answer',
+        'fill_blank',
+    ];
+
     protected $fillable = [
         'course_id',
         'lesson_id',

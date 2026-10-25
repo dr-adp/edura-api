@@ -17,11 +17,13 @@ class QuizAnswer extends Model
         'answer_text',
         'is_correct',
         'marks_obtained',
+        'manually_graded_at',
     ];
 
     protected $casts = [
         'is_correct' => 'boolean',
         'marks_obtained' => 'decimal:2',
+        'manually_graded_at' => 'datetime',
     ];
 
     public function quizAttempt()

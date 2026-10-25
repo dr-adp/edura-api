@@ -269,6 +269,8 @@ class GradebookController extends Controller
             return;
         }
 
+        $gradebooks->institutionallyConsistent();
+
         if ($user->hasRole('institution-admin')) {
             $institutionUser = $this->institutionUserFor($user);
 
@@ -337,6 +339,10 @@ class GradebookController extends Controller
 
         if ($user->hasRole('super-admin')) {
             return;
+        }
+
+        if (!$gradebook->hasConsistentInstitutions()) {
+            abort(403, 'Course and student must belong to the same institution.');
         }
 
         if ($user->hasRole('institution-admin')) {
@@ -495,6 +501,7 @@ class GradebookController extends Controller
     private function studentEnrolledInCourse(int $courseId, int $studentProfileId): bool
     {
         return CourseEnrollment::where('course_id', $courseId)
+            ->institutionallyConsistent()
             ->where('student_profile_id', $studentProfileId)
             ->whereIn('status', self::VALID_ENROLLMENT_STATUSES)
             ->exists();

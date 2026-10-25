@@ -4,13 +4,19 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\CourseEnrollment;
+use App\Models\Assignment;
+use App\Models\AssignmentSubmission;
 use App\Models\InstitutionUser;
 use App\Models\Lesson;
 use App\Models\LessonProgress;
 use App\Models\ParentProfile;
+use App\Models\QuestionBank;
+use App\Models\Quiz;
+use App\Models\QuizAttempt;
 use App\Models\StudentProfile;
 use App\Models\TeacherProfile;
 use App\Models\User;
+use App\Services\CourseEnrollmentService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -23,6 +29,11 @@ use App\Http\Requests\UpdateLessonProgressRequest;
 
 class LessonProgressController extends Controller
 {
+    public function __construct(
+        private CourseEnrollmentService $courseEnrollmentService
+    ) {
+    }
+
     private const PROGRESS_RELATIONS = [
         'courseEnrollment.course',
         'courseEnrollment.studentProfile.user',
@@ -74,6 +85,7 @@ class LessonProgressController extends Controller
         */
         $this->authorizeEnrollmentAccess($courseEnrollment, $user, true);
         $this->ensureLessonBelongsToEnrollment($lesson, $courseEnrollment);
+        $this->rejectLearnerCompletionFields($user, $validated);
 
         $validated['status'] = $validated['status'] ?? 'in_progress';
         $validated['progress_percentage'] = $validated['progress_percentage'] ?? 0;
@@ -90,7 +102,7 @@ class LessonProgressController extends Controller
         $lessonProgress = DB::transaction(function () use ($validated, $courseEnrollment) {
             $lessonProgress = LessonProgress::create($validated);
 
-            $this->recalculateCourseEnrollmentProgress($courseEnrollment);
+            $this->courseEnrollmentService->recalculateProgress($courseEnrollment);
 
             return $lessonProgress;
         });
@@ -120,6 +132,16 @@ class LessonProgressController extends Controller
 
         $validated = $request->validated();
 
+        if (
+            $user->hasRole('student') &&
+            isset($validated['lesson_id']) &&
+            (int) $validated['lesson_id'] !== (int) $lessonProgress->lesson_id
+        ) {
+            throw ValidationException::withMessages([
+                'lesson_id' => 'Students cannot change the lesson for an existing progress record.',
+            ]);
+        }
+
         $originalEnrollment = $lessonProgress->courseEnrollment;
         $targetEnrollmentId = $validated['course_enrollment_id']
             ?? $lessonProgress->course_enrollment_id;
@@ -138,20 +160,8 @@ class LessonProgressController extends Controller
         */
         $this->authorizeEnrollmentAccess($targetEnrollment, $user, true);
         $this->ensureLessonBelongsToEnrollment($targetLesson, $targetEnrollment);
-
-        if (
-            ($validated['status'] ?? null) === 'in_progress' &&
-            ! $lessonProgress->started_at
-        ) {
-            $validated['started_at'] = now();
-        }
-
-        if (($validated['status'] ?? null) === 'completed') {
-            $validated['progress_percentage'] = 100;
-            $validated['completed_at'] = now();
-        } elseif (array_key_exists('status', $validated)) {
-            $validated['completed_at'] = null;
-        }
+        $this->rejectLearnerCompletionFields($user, $validated);
+        $validated = $this->normalizeProgressUpdate($lessonProgress, $validated);
 
         DB::transaction(function () use (
             $lessonProgress,
@@ -161,15 +171,57 @@ class LessonProgressController extends Controller
         ) {
             $lessonProgress->update($validated);
 
-            $this->recalculateCourseEnrollmentProgress($originalEnrollment);
+            $this->courseEnrollmentService->recalculateProgress($originalEnrollment);
 
             if ((int) $originalEnrollment->id !== (int) $targetEnrollment->id) {
-                $this->recalculateCourseEnrollmentProgress($targetEnrollment);
+                $this->courseEnrollmentService->recalculateProgress($targetEnrollment);
             }
         });
 
         return response()->json([
             'message' => 'Lesson progress updated successfully.',
+            'data' => $lessonProgress->fresh()->load(self::PROGRESS_RELATIONS),
+        ]);
+    }
+
+    public function complete(LessonProgress $lessonProgress): JsonResponse
+    {
+        /** @var User $user */
+        $user = Auth::user();
+
+        $this->authorizeLessonProgressMutation($lessonProgress, $user);
+
+        $courseEnrollment = $lessonProgress->courseEnrollment;
+        $lesson = $lessonProgress->lesson;
+
+        $this->ensureLessonBelongsToEnrollment($lesson, $courseEnrollment);
+
+        if ($lesson->status !== 'published') {
+            throw ValidationException::withMessages([
+                'lesson_id' => 'Only published lessons can be completed.',
+            ]);
+        }
+
+        if ($user->hasRole('student')) {
+            $this->ensureRequiredLessonAssessmentsComplete(
+                $lesson,
+                $courseEnrollment
+            );
+        }
+
+        DB::transaction(function () use ($lessonProgress, $courseEnrollment) {
+            $lessonProgress->update([
+                'status' => 'completed',
+                'progress_percentage' => 100,
+                'started_at' => $lessonProgress->started_at ?? now(),
+                'completed_at' => $lessonProgress->completed_at ?? now(),
+            ]);
+
+            $this->courseEnrollmentService->recalculateProgress($courseEnrollment);
+        });
+
+        return response()->json([
+            'message' => 'Lesson completed successfully.',
             'data' => $lessonProgress->fresh()->load(self::PROGRESS_RELATIONS),
         ]);
     }
@@ -183,7 +235,7 @@ class LessonProgressController extends Controller
         DB::transaction(function () use ($lessonProgress, $courseEnrollment) {
             $lessonProgress->delete();
 
-            $this->recalculateCourseEnrollmentProgress($courseEnrollment);
+            $this->courseEnrollmentService->recalculateProgress($courseEnrollment);
         });
 
         return response()->json([
@@ -191,50 +243,176 @@ class LessonProgressController extends Controller
         ]);
     }
 
-    private function recalculateCourseEnrollmentProgress(
-        CourseEnrollment $courseEnrollment
+    /**
+     * Learners can report partial progress, but completion is recorded only
+     * through the dedicated completion action.
+     */
+    private function rejectLearnerCompletionFields(
+        User $user,
+        array $validated
     ): void {
-        $courseEnrollment->loadMissing('course');
-
-        $course = $courseEnrollment->course;
-
-        $totalLessons = Lesson::where('course_id', $course->id)
-            ->where('status', 'published')
-            ->count();
-
-        if ($totalLessons === 0) {
-            $courseEnrollment->update([
-                'progress_percentage' => 0,
-                'status' => 'active',
-                'completed_at' => null,
-            ]);
-
+        if (! $user->hasRole('student')) {
             return;
         }
 
-        $completedLessons = LessonProgress::where(
-            'course_enrollment_id',
-            $courseEnrollment->id
-        )
-            ->where('status', 'completed')
-            ->whereHas('lesson', function (Builder $lessonQuery) use ($course) {
-                $lessonQuery
-                    ->where('course_id', $course->id)
-                    ->where('status', 'published');
-            })
-            ->distinct('lesson_id')
-            ->count('lesson_id');
+        $errors = [];
 
-        $percentage = min(
-            100,
-            round(($completedLessons / $totalLessons) * 100, 2)
-        );
+        if (($validated['status'] ?? null) === 'completed') {
+            $errors['status'] = 'Use the lesson completion action to complete a lesson.';
+        }
 
-        $courseEnrollment->update([
-            'progress_percentage' => $percentage,
-            'status' => $percentage >= 100 ? 'completed' : 'active',
-            'completed_at' => $percentage >= 100 ? now() : null,
-        ]);
+        if (
+            array_key_exists('progress_percentage', $validated) &&
+            $validated['progress_percentage'] !== null &&
+            (float) $validated['progress_percentage'] >= 100
+        ) {
+            $errors['progress_percentage'] = 'Lesson completion must use the lesson completion action.';
+        }
+
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
+    }
+
+    private function normalizeProgressUpdate(
+        LessonProgress $lessonProgress,
+        array $validated
+    ): array {
+        $hasStatus = isset($validated['status']);
+        $status = $validated['status'] ?? $lessonProgress->status;
+        $hasProgressPercentage = array_key_exists('progress_percentage', $validated)
+            && $validated['progress_percentage'] !== null;
+        $progressPercentage = $hasProgressPercentage
+            ? (float) $validated['progress_percentage']
+            : (float) $lessonProgress->progress_percentage;
+
+        if ($status === 'completed') {
+            $validated['status'] = 'completed';
+            $validated['progress_percentage'] = 100;
+            $validated['completed_at'] = $lessonProgress->completed_at ?? now();
+            $validated['started_at'] = $lessonProgress->started_at ?? now();
+
+            return $validated;
+        }
+
+        if ($status === 'not_started') {
+            if (! $hasStatus && $hasProgressPercentage && $progressPercentage > 0) {
+                $status = 'in_progress';
+                $validated['status'] = 'in_progress';
+            } else {
+                $validated['progress_percentage'] = 0;
+                $validated['completed_at'] = null;
+
+                return $validated;
+            }
+        }
+
+        if (
+            $status === 'in_progress' &&
+            $hasProgressPercentage &&
+            $progressPercentage >= 100
+        ) {
+            throw ValidationException::withMessages([
+                'progress_percentage' => 'Use completed status to record 100% progress.',
+            ]);
+        }
+
+        if ($status === 'in_progress' && $progressPercentage >= 100) {
+            $validated['progress_percentage'] = 0;
+        }
+
+        $validated['completed_at'] = null;
+
+        if ($status === 'in_progress' && ! $lessonProgress->started_at) {
+            $validated['started_at'] = now();
+        }
+
+        return $validated;
+    }
+
+    /**
+     * Published assessments explicitly attached to a lesson are considered
+     * completion requirements. Course-level assessments are not included.
+     */
+    private function ensureRequiredLessonAssessmentsComplete(
+        Lesson $lesson,
+        CourseEnrollment $courseEnrollment
+    ): void {
+        $quizIds = Quiz::where('lesson_id', $lesson->id)
+            ->where('course_id', $courseEnrollment->course_id)
+            ->where('status', 'published')
+            ->pluck('id');
+
+        $assignmentIds = Assignment::where('lesson_id', $lesson->id)
+            ->where('course_id', $courseEnrollment->course_id)
+            ->where('status', 'published')
+            ->pluck('id');
+
+        if ($quizIds->isEmpty() && $assignmentIds->isEmpty()) {
+            throw ValidationException::withMessages([
+                'assessment' => 'This lesson has no verified completion pathway configured.',
+            ]);
+        }
+
+        foreach ($quizIds as $quizId) {
+            $hasPassedAttempt = QuizAttempt::where('quiz_id', $quizId)
+                ->where('student_profile_id', $courseEnrollment->student_profile_id)
+                ->where('status', 'evaluated')
+                ->where('result_status', 'passed')
+                ->whereNotNull('submitted_at')
+                ->whereDoesntHave('answers', function (Builder $answerQuery) {
+                    $answerQuery
+                        ->whereNull('manually_graded_at')
+                        ->whereHas('questionBank', function (Builder $questionQuery) {
+                            $questionQuery->whereIn(
+                                'question_type',
+                                QuestionBank::MANUAL_QUESTION_TYPES
+                            );
+                        });
+                })
+                ->exists();
+
+            if (! $hasPassedAttempt) {
+                throw ValidationException::withMessages([
+                    'assessment' => 'Pass each published quiz attached to this lesson before completing it.',
+                ]);
+            }
+        }
+
+        foreach ($assignmentIds as $assignmentId) {
+            $hasSubmittedAssignment = AssignmentSubmission::where(
+                'assignment_id',
+                $assignmentId
+            )
+                ->where('student_profile_id', $courseEnrollment->student_profile_id)
+                ->whereIn('status', ['submitted', 'reviewed', 'returned'])
+                ->whereNotNull('submitted_at')
+                ->where(function (Builder $submissionQuery) {
+                    $submissionQuery
+                        ->where(function (Builder $payloadQuery) {
+                            $payloadQuery
+                                ->whereNotNull('submission_text')
+                                ->whereRaw("TRIM(submission_text) <> ''");
+                        })
+                        ->orWhere(function (Builder $payloadQuery) {
+                            $payloadQuery
+                                ->whereNotNull('external_url')
+                                ->whereRaw("TRIM(external_url) <> ''");
+                        })
+                        ->orWhere(function (Builder $payloadQuery) {
+                            $payloadQuery
+                                ->whereNotNull('file_path')
+                                ->whereRaw("TRIM(file_path) <> ''");
+                        });
+                })
+                ->exists();
+
+            if (! $hasSubmittedAssignment) {
+                throw ValidationException::withMessages([
+                    'assessment' => 'Submit each published assignment attached to this lesson before completing it.',
+                ]);
+            }
+        }
     }
 
     /*
@@ -247,6 +425,12 @@ class LessonProgressController extends Controller
         if ($user->hasRole('super-admin')) {
             return;
         }
+
+        $query->whereHas(
+            'courseEnrollment',
+            fn (Builder $enrollmentQuery) => $enrollmentQuery
+                ->institutionallyConsistent()
+        );
 
         if ($user->hasRole('institution-admin')) {
             $institutionUser = $this->institutionUserFor($user);
@@ -388,6 +572,10 @@ class LessonProgressController extends Controller
 
         if ($user->hasRole('super-admin')) {
             return;
+        }
+
+        if (!$courseEnrollment->hasConsistentInstitutions()) {
+            abort(403, 'Course and student must belong to the same institution.');
         }
 
         if ($user->hasRole('institution-admin')) {

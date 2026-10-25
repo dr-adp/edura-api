@@ -289,6 +289,17 @@ class CertificateController extends BaseApiController
             return;
         }
 
+        $query->whereHas('course', function (Builder $courseQuery) {
+            $courseQuery->whereIn('courses.institution_id', function ($studentQuery) {
+                $studentQuery->select('student_profiles.institution_id')
+                    ->from('student_profiles')
+                    ->whereColumn(
+                        'student_profiles.id',
+                        'certificates.student_profile_id'
+                    );
+            });
+        });
+
         if ($user->hasRole('institution-admin')) {
             $institutionUser = $this->institutionUserFor($user);
 
@@ -368,6 +379,15 @@ class CertificateController extends BaseApiController
 
         if ($user->hasRole('super-admin')) {
             return;
+        }
+
+        if (
+            !$certificate->course ||
+            !$certificate->studentProfile ||
+            (int) $certificate->course->institution_id !==
+                (int) $certificate->studentProfile->institution_id
+        ) {
+            abort(403, 'Course and student must belong to the same institution.');
         }
 
         if ($user->hasRole('institution-admin')) {
@@ -497,6 +517,7 @@ class CertificateController extends BaseApiController
     private function studentEnrolledInCourse(int $courseId, int $studentProfileId): bool
     {
         return CourseEnrollment::where('course_id', $courseId)
+            ->institutionallyConsistent()
             ->where('student_profile_id', $studentProfileId)
             ->whereIn('status', self::VALID_ENROLLMENT_STATUSES)
             ->exists();

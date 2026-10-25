@@ -453,6 +453,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
             'destroy',
         ]);
 
+        Route::post(
+            '/lesson-progress/{lessonProgress}/complete',
+            [LessonProgressController::class, 'complete']
+        );
+
         Route::apiResource(
             'assignment-submissions',
             AssignmentSubmissionController::class

@@ -29,6 +29,10 @@ class QuizAttemptController extends Controller
             'studentProfile.batch'
         ]);
 
+        if (!$user->hasRole('super-admin')) {
+            $query->institutionallyConsistent();
+        }
+
         /*
     |--------------------------------------------------------------------------
     | Student
@@ -117,7 +121,9 @@ class QuizAttemptController extends Controller
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (!$institutionUser) {
 
@@ -232,7 +238,9 @@ class QuizAttemptController extends Controller
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (!$institutionUser) {
 
@@ -602,30 +610,7 @@ class QuizAttemptController extends Controller
             );
         }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Institution Admin Scope
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('institution-admin')) {
-
-            $institutionUser = InstitutionUser::where(
-                'user_id',
-                $user->id
-            )->first();
-
-            if (
-                !$institutionUser ||
-                $quizAttempt->studentProfile->institution_id !==
-                $institutionUser->institution_id
-            ) {
-
-                abort(
-                    403,
-                    'Unauthorized institution access.'
-                );
-            }
-        }
+        $this->authorizeQuizAttemptAccess($quizAttempt);
 
         $quizAttempt->delete();
 
@@ -655,6 +640,10 @@ class QuizAttemptController extends Controller
             return;
         }
 
+        if (!$quizAttempt->hasConsistentInstitutions()) {
+            abort(403, 'Course and student must belong to the same institution.');
+        }
+
         /*
     |--------------------------------------------------------------------------
     | Institution Admin
@@ -665,7 +654,9 @@ class QuizAttemptController extends Controller
             $institutionUser = InstitutionUser::where(
                 'user_id',
                 $user->id
-            )->first();
+            )
+                ->where('status', 'active')
+                ->first();
 
             if (!$institutionUser) {
 
@@ -803,6 +794,7 @@ class QuizAttemptController extends Controller
             'course_id',
             $quiz->course_id
         )
+            ->institutionallyConsistent()
             ->where(
                 'student_profile_id',
                 $studentProfile->id

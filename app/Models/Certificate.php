@@ -31,23 +31,24 @@ class Certificate extends Model
         'final_percentage' => 'decimal:2',
     ];
 
-    protected $appends = [
-        'certificate_file_url',
-        'public_verification_url',
+    protected $hidden = [
+        'certificate_file',
     ];
 
-    public function getCertificateFileUrlAttribute(): ?string
-    {
-        return $this->certificate_file
-            ? asset('storage/' . $this->certificate_file)
-            : null;
-    }
+    protected $appends = [
+        'public_verification_url',
+    ];
 
     public function getPublicVerificationUrlAttribute(): ?string
     {
         return $this->verification_token
             ? url('/api/verify-certificate/' . $this->verification_token)
             : null;
+    }
+
+    public function isIssuedAndValid(): bool
+    {
+        return $this->status === 'issued' && $this->verification_status === 'valid';
     }
 
     public function course()

@@ -11,8 +11,13 @@ use App\Models\Course;
 use App\Models\Lesson;
 use App\Models\InstitutionUser;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use App\Http\Requests\StoreQuestionBankRequest;
 use App\Http\Requests\UpdateQuestionBankRequest;
+use App\Models\Quiz;
+use App\Models\QuizQuestion;
+use App\Models\QuestionOption;
+use App\Services\CourseAssessmentLockService;
 
 class QuestionBankController extends BaseApiController
 {
@@ -117,27 +122,23 @@ class QuestionBankController extends BaseApiController
     | Course Validation
     |--------------------------------------------------------------------------
     */
-        $course = Course::findOrFail(
-            $validated['course_id']
-        );
+        $course = Course::findOrFail($validated['course_id']);
 
         $this->authorizeQuestionBankAccess(
             course: $course
         );
 
-        /*
-    |--------------------------------------------------------------------------
-    | Lesson Validation
-    |--------------------------------------------------------------------------
-    */
-        $this->validateQuestionRelations(
-            $validated,
-            $course
-        );
+        $question = app(CourseAssessmentLockService::class)
+            ->transactionWithLockSetRetries(function () use ($validated): QuestionBank {
+                $locks = app(CourseAssessmentLockService::class);
+                $courseId = (int) $validated['course_id'];
+                $locks->lockCourses([$courseId]);
+                $course = Course::findOrFail($courseId);
+                $this->authorizeQuestionBankAccess(course: $course);
+                $this->validateQuestionRelations($validated, $course);
 
-        $question = QuestionBank::create(
-            $validated
-        );
+                return QuestionBank::create($validated);
+            });
 
         return $this->successResponse(
             $question->load([
@@ -177,32 +178,80 @@ class QuestionBankController extends BaseApiController
 
         $validated = $request->validated();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Target Course Validation
-    |--------------------------------------------------------------------------
-    */
-        $course = isset($validated['course_id'])
-            ? Course::findOrFail($validated['course_id'])
-            : $questionBank->course;
+        $targetCourseId = isset($validated['course_id'])
+            ? (int) $validated['course_id']
+            : (int) $questionBank->course_id;
+        $course = Course::findOrFail($targetCourseId);
 
         $this->authorizeQuestionBankAccess(
             course: $course
         );
 
-        /*
-    |--------------------------------------------------------------------------
-    | Lesson Validation
-    |--------------------------------------------------------------------------
-    */
-        $this->validateQuestionRelations(
+        $questionBankId = (int) $questionBank->id;
+        $boundCourseId = (int) $questionBank->course_id;
+        $locks = app(CourseAssessmentLockService::class);
+        $locks->transactionWithLockSetRetries(function () use (
+            $locks,
             $validated,
-            $course
-        );
+            $questionBankId,
+            $boundCourseId,
+            $targetCourseId
+        ): void {
+            $parents = $locks->lockQuestionBanksAndCourses(
+                [$questionBankId],
+                [$boundCourseId, $targetCourseId]
+            );
+            $lockedQuestion = $parents['question_banks']->firstWhere('id', $questionBankId);
+            if (!$lockedQuestion) {
+                abort(404);
+            }
 
-        $questionBank->update(
-            $validated
-        );
+            $targetId = isset($validated['course_id'])
+                ? (int) $validated['course_id']
+                : (int) $lockedQuestion->course_id;
+            $course = Course::findOrFail($targetId);
+            $this->authorizeQuestionBankAccess(questionBank: $lockedQuestion);
+            $this->authorizeQuestionBankAccess(course: $course);
+            $this->assertLinkedQuizzesBelongToQuestionCourse(
+                $parents['quizzes'],
+                $lockedQuestion->course_id
+            );
+
+            $effectiveLessonId = array_key_exists('lesson_id', $validated)
+                ? $validated['lesson_id']
+                : $lockedQuestion->lesson_id;
+            $this->validateQuestionRelations(
+                ['lesson_id' => $effectiveLessonId],
+                $course
+            );
+
+            if (
+                isset($validated['course_id']) &&
+                (int) $lockedQuestion->course_id !== $targetId
+            ) {
+                if (DB::table('quiz_answers')
+                    ->where('question_bank_id', $questionBankId)
+                    ->exists()) {
+                    abort(409, 'A question with answer history cannot be moved to another course.');
+                }
+
+                foreach ($parents['quizzes'] as $linkedQuiz) {
+                    if ((int) $linkedQuiz->course_id !== $targetId) {
+                        abort(422, 'A question linked to a quiz cannot be moved to another course.');
+                    }
+                }
+            }
+
+            if (
+                array_key_exists('question_type', $validated) &&
+                $validated['question_type'] !== $lockedQuestion->question_type &&
+                DB::table('quiz_answers')->where('question_bank_id', $questionBankId)->exists()
+            ) {
+                abort(409, 'A question type with answer history cannot be changed.');
+            }
+
+            $lockedQuestion->update($validated);
+        });
 
         return $this->successResponse(
             $questionBank
@@ -226,7 +275,51 @@ class QuestionBankController extends BaseApiController
             questionBank: $questionBank
         );
 
-        $questionBank->delete();
+        $questionBankId = (int) $questionBank->id;
+        $courseId = (int) $questionBank->course_id;
+        $locks = app(CourseAssessmentLockService::class);
+        $locks->transactionWithLockSetRetries(function () use (
+            $locks,
+            $questionBankId,
+            $courseId
+        ): void {
+            $parents = $locks->lockQuestionBanksAndCourses(
+                [$questionBankId],
+                [$courseId]
+            );
+            $lockedQuestion = $parents['question_banks']->firstWhere('id', $questionBankId);
+            if (!$lockedQuestion) {
+                abort(404);
+            }
+
+            $this->authorizeQuestionBankAccess(questionBank: $lockedQuestion);
+            $this->assertLinkedQuizzesBelongToQuestionCourse(
+                $parents['quizzes'],
+                $lockedQuestion->course_id
+            );
+
+            if (DB::table('quiz_answers')
+                ->where('question_bank_id', $questionBankId)
+                ->exists()) {
+                abort(409, 'A question with answer history cannot be deleted.');
+            }
+
+            $optionIds = QuestionOption::query()
+                ->where('question_bank_id', $questionBankId)
+                ->orderBy('id')
+                ->pluck('id')
+                ->map(static fn ($id): int => (int) $id)
+                ->all();
+            if ($optionIds !== []) {
+                $locks->lockQuestionOptions($optionIds);
+            }
+
+            $lockedQuestion->delete();
+
+            foreach ($parents['quizzes'] as $quiz) {
+                $this->recalculateQuizTotalMarks($quiz);
+            }
+        });
 
         return $this->successResponse(
             null,
@@ -369,5 +462,25 @@ class QuestionBankController extends BaseApiController
                 );
             }
         }
+    }
+
+    private function assertLinkedQuizzesBelongToQuestionCourse(
+        \Illuminate\Support\Collection $quizzes,
+        int|string $courseId
+    ): void {
+        foreach ($quizzes as $quiz) {
+            if ((int) $quiz->course_id !== (int) $courseId) {
+                abort(422, 'Question must belong to the same course as every linked quiz.');
+            }
+        }
+    }
+
+    private function recalculateQuizTotalMarks(Quiz $quiz): void
+    {
+        $quiz->update([
+            'total_marks' => QuizQuestion::query()
+                ->where('quiz_id', $quiz->id)
+                ->sum('marks'),
+        ]);
     }
 }

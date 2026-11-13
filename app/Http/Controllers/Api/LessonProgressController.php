@@ -9,7 +9,6 @@ use App\Models\AssignmentSubmission;
 use App\Models\InstitutionUser;
 use App\Models\Lesson;
 use App\Models\LessonProgress;
-use App\Models\ParentProfile;
 use App\Models\QuestionBank;
 use App\Models\Quiz;
 use App\Models\QuizAttempt;
@@ -17,6 +16,7 @@ use App\Models\StudentProfile;
 use App\Models\TeacherProfile;
 use App\Models\User;
 use App\Services\CourseEnrollmentService;
+use App\Services\ParentStudentAccessService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -30,14 +30,15 @@ use App\Http\Requests\UpdateLessonProgressRequest;
 class LessonProgressController extends Controller
 {
     public function __construct(
-        private CourseEnrollmentService $courseEnrollmentService
+        private CourseEnrollmentService $courseEnrollmentService,
+        private ParentStudentAccessService $parentStudentAccessService
     ) {
     }
 
     private const PROGRESS_RELATIONS = [
         'courseEnrollment.course',
         'courseEnrollment.studentProfile.user',
-        'lesson',
+        'lesson.courseSection',
     ];
 
     private const MODIFIABLE_ENROLLMENT_STATUSES = [
@@ -58,10 +59,15 @@ class LessonProgressController extends Controller
         |--------------------------------------------------------------------------
         */
         $this->scopeProgressQuery($query, $user);
+        $progresses = $query->latest()->paginate(20);
+
+        $progresses->getCollection()->each(function (LessonProgress $progress) {
+            $this->sanitizeLessonSectionForResponse($progress);
+        });
 
         return response()->json([
             'message' => 'Lesson progress records fetched successfully.',
-            'data' => $query->latest()->paginate(20),
+            'data' => $progresses,
         ]);
     }
 
@@ -109,7 +115,9 @@ class LessonProgressController extends Controller
 
         return response()->json([
             'message' => 'Lesson progress created successfully.',
-            'data' => $lessonProgress->load(self::PROGRESS_RELATIONS),
+            'data' => $this->sanitizeLessonSectionForResponse(
+                $lessonProgress->load(self::PROGRESS_RELATIONS)
+            ),
         ], 201);
     }
 
@@ -119,7 +127,9 @@ class LessonProgressController extends Controller
 
         return response()->json([
             'message' => 'Lesson progress fetched successfully.',
-            'data' => $lessonProgress->load(self::PROGRESS_RELATIONS),
+            'data' => $this->sanitizeLessonSectionForResponse(
+                $lessonProgress->load(self::PROGRESS_RELATIONS)
+            ),
         ]);
     }
 
@@ -180,7 +190,9 @@ class LessonProgressController extends Controller
 
         return response()->json([
             'message' => 'Lesson progress updated successfully.',
-            'data' => $lessonProgress->fresh()->load(self::PROGRESS_RELATIONS),
+            'data' => $this->sanitizeLessonSectionForResponse(
+                $lessonProgress->fresh()->load(self::PROGRESS_RELATIONS)
+            ),
         ]);
     }
 
@@ -222,7 +234,9 @@ class LessonProgressController extends Controller
 
         return response()->json([
             'message' => 'Lesson completed successfully.',
-            'data' => $lessonProgress->fresh()->load(self::PROGRESS_RELATIONS),
+            'data' => $this->sanitizeLessonSectionForResponse(
+                $lessonProgress->fresh()->load(self::PROGRESS_RELATIONS)
+            ),
         ]);
     }
 
@@ -272,6 +286,41 @@ class LessonProgressController extends Controller
         if ($errors !== []) {
             throw ValidationException::withMessages($errors);
         }
+    }
+
+    /**
+     * Hide a stale section reference in the serialized lesson without
+     * changing the persisted lesson record.
+     */
+    private function sanitizeLessonSectionForResponse(
+        LessonProgress $lessonProgress
+    ): LessonProgress {
+        $lesson = $lessonProgress->lesson;
+
+        if (! $lesson) {
+            return $lessonProgress;
+        }
+
+        if ($lesson->course_section_id === null) {
+            $lesson->unsetRelation('courseSection');
+
+            return $lessonProgress;
+        }
+
+        $section = $lesson->courseSection;
+
+        if (
+            ! $section ||
+            (int) $section->course_id !== (int) $lesson->course_id
+        ) {
+            $lesson->setAttribute('course_section_id', null);
+            $lesson->setRelation('courseSection', null);
+        } else {
+            // Keep the existing progress response shape for valid relationships.
+            $lesson->unsetRelation('courseSection');
+        }
+
+        return $lessonProgress;
     }
 
     private function normalizeProgressUpdate(
@@ -498,20 +547,33 @@ class LessonProgressController extends Controller
         }
 
         if ($user->hasRole('parent')) {
-            $studentProfileIds = ParentProfile::where('user_id', $user->id)
-                ->where('status', 'active')
-                ->whereNotNull('student_profile_id')
-                ->pluck('student_profile_id');
-
             $query->whereHas(
                 'courseEnrollment',
-                function (Builder $enrollmentQuery) use ($studentProfileIds) {
-                    $enrollmentQuery->whereIn(
-                        'student_profile_id',
-                        $studentProfileIds
+                function (Builder $enrollmentQuery) use ($user) {
+                    $this->parentStudentAccessService->scopeStudentRecords(
+                        $enrollmentQuery,
+                        $user,
+                        'course_enrollments.student_profile_id'
                     );
                 }
-            );
+            )->whereExists(function ($relatedLessonQuery) {
+                $relatedLessonQuery->selectRaw('1')
+                    ->from('course_enrollments as linked_enrollments')
+                    ->join(
+                        'lessons as linked_lessons',
+                        'linked_lessons.id',
+                        '=',
+                        'lesson_progress.lesson_id'
+                    )
+                    ->whereColumn(
+                        'linked_enrollments.id',
+                        'lesson_progress.course_enrollment_id'
+                    )
+                    ->whereColumn(
+                        'linked_lessons.course_id',
+                        'linked_enrollments.course_id'
+                    );
+            });
 
             return;
         }
@@ -540,6 +602,18 @@ class LessonProgressController extends Controller
             $user,
             false
         );
+
+        if ($user->hasRole('parent')) {
+            $lessonProgress->loadMissing('lesson');
+
+            if (
+                ! $lessonProgress->lesson ||
+                (int) $lessonProgress->lesson->course_id !==
+                    (int) $lessonProgress->courseEnrollment->course_id
+            ) {
+                abort(403, 'Lesson progress does not belong to the linked child course.');
+            }
+        }
     }
 
     private function authorizeLessonProgressMutation(
@@ -640,19 +714,13 @@ class LessonProgressController extends Controller
                 abort(403, 'Unauthorized: Lesson progress is read-only for parents.');
             }
 
-            $hasActiveChildLink = ParentProfile::where('user_id', $user->id)
-                ->where('status', 'active')
-                ->where(
-                    'student_profile_id',
-                    $courseEnrollment->student_profile_id
-                )
-                ->exists();
+            $this->parentStudentAccessService->authorizeStudent(
+                $user,
+                (int) $courseEnrollment->student_profile_id,
+                'Unauthorized: You can only view your child progress.'
+            );
 
-            if ($hasActiveChildLink) {
-                return;
-            }
-
-            abort(403, 'Unauthorized: You can only view your child progress.');
+            return;
         }
 
         abort(403, 'Unauthorized role.');

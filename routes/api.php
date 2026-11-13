@@ -352,6 +352,11 @@ Route::middleware(['auth:sanctum'])->group(function () {
             [CertificateController::class, 'generate']
         );
 
+        Route::post(
+            '/certificates/{certificate}/reconcile',
+            [CertificateController::class, 'reconcile']
+        );
+
         Route::apiResource(
             'certificates',
             CertificateController::class

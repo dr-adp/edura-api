@@ -13,6 +13,7 @@ use App\Models\Course;
 use App\Models\InstitutionUser;
 use App\Models\StudentProfile;
 use App\Models\User;
+use App\Services\ParentStudentAccessService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -23,6 +24,11 @@ use Illuminate\Validation\ValidationException;
 
 class AttendanceRecordController extends Controller
 {
+    public function __construct(
+        private ParentStudentAccessService $parentStudentAccessService
+    ) {
+    }
+
     private const STATUSES = [
         'present',
         'absent',
@@ -486,20 +492,38 @@ class AttendanceRecordController extends Controller
     |--------------------------------------------------------------------------
     */ elseif ($user->hasRole('parent')) {
 
-            $parentProfile = $user->parentProfile;
-
-            if (!$parentProfile) {
-
-                abort(
-                    403,
-                    'Parent profile not found.'
-                );
-            }
-
-            $query->where(
-                'student_profile_id',
-                $parentProfile->student_profile_id
+            $this->parentStudentAccessService->scopeStudentRecords(
+                $query,
+                $user,
+                'attendance_records.student_profile_id'
             );
+            $query
+                ->whereHas('studentProfile', function ($studentQuery) {
+                    $studentQuery->whereColumn(
+                        'student_profiles.institution_id',
+                        'attendance_records.institution_id'
+                    );
+                })
+                ->where(function ($recordQuery) {
+                    $recordQuery
+                        ->whereNull('attendance_records.course_id')
+                        ->orWhereHas('course', function ($courseQuery) {
+                            $courseQuery->whereColumn(
+                                'courses.institution_id',
+                                'attendance_records.institution_id'
+                            );
+                        });
+                })
+                ->where(function ($recordQuery) {
+                    $recordQuery
+                        ->whereNull('attendance_records.batch_id')
+                        ->orWhereHas('batch', function ($batchQuery) {
+                            $batchQuery->whereColumn(
+                                'batches.institution_id',
+                                'attendance_records.institution_id'
+                            );
+                        });
+                });
         }
 
         /*
@@ -891,32 +915,42 @@ class AttendanceRecordController extends Controller
     |--------------------------------------------------------------------------
     */
         if ($user->hasRole('parent')) {
-
-            $parentProfile = $user
-                ->parentProfile;
-
-            if (!$parentProfile) {
-
-                abort(
-                    403,
-                    'Parent profile not found.'
-                );
+            if ($attendanceRecord) {
+                $attendanceRecord->loadMissing([
+                    'studentProfile',
+                    'course',
+                    'batch',
+                ]);
             }
 
             $targetStudent =
                 $studentProfile
                 ?? $attendanceRecord?->studentProfile;
 
-            if (
-                !$targetStudent ||
-                (int)$targetStudent->id !==
-                (int)$parentProfile->student_profile_id
-            ) {
+            if (! $targetStudent) {
+                abort(403, 'You can only access your child attendance.');
+            }
 
-                abort(
-                    403,
-                    'You can only access your child attendance.'
-                );
+            $this->parentStudentAccessService->authorizeStudent(
+                $user,
+                $targetStudent,
+                'You can only access your child attendance.'
+            );
+
+            if (
+                $attendanceRecord &&
+                (
+                    (int) $attendanceRecord->institution_id !==
+                        (int) $targetStudent->institution_id ||
+                    ($attendanceRecord->course &&
+                        (int) $attendanceRecord->course->institution_id !==
+                            (int) $targetStudent->institution_id) ||
+                    ($attendanceRecord->batch &&
+                        (int) $attendanceRecord->batch->institution_id !==
+                            (int) $targetStudent->institution_id)
+                )
+            ) {
+                abort(403, 'You can only access consistent attendance for your child.');
             }
 
             return;

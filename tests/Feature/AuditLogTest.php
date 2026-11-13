@@ -144,6 +144,43 @@ class AuditLogTest extends TestCase
             ->assertJsonPath('data.data.1.id', $older->id);
     }
 
+    public function test_multi_institution_admin_can_view_audit_logs_for_each_active_membership_only(): void
+    {
+        $firstInstitution = $this->createInstitution('AUDIT-MULTI-A');
+        $secondInstitution = $this->createInstitution('AUDIT-MULTI-B');
+        $inactiveInstitution = $this->createInstitution('AUDIT-MULTI-INACTIVE');
+        $admin = $this->createInstitutionAdmin($firstInstitution);
+
+        InstitutionUser::create([
+            'institution_id' => $secondInstitution->id,
+            'user_id' => $admin->id,
+            'role_in_institution' => 'admin',
+            'status' => 'active',
+        ]);
+        InstitutionUser::create([
+            'institution_id' => $inactiveInstitution->id,
+            'user_id' => $admin->id,
+            'role_in_institution' => 'admin',
+            'status' => 'inactive',
+        ]);
+
+        $authorizedLog = $this->createLog($secondInstitution, [
+            'description' => 'Second active membership activity.',
+        ]);
+        $inactiveLog = $this->createLog($inactiveInstitution, [
+            'description' => 'Inactive membership activity.',
+        ]);
+
+        $this->authenticate($admin);
+
+        $this->getJson('/api/audit-logs?per_page=10')
+            ->assertOk()
+            ->assertJsonCount(1, 'data.data')
+            ->assertJsonPath('data.data.0.id', $authorizedLog->id);
+        $this->getJson('/api/audit-logs/' . $authorizedLog->id)->assertOk();
+        $this->getJson('/api/audit-logs/' . $inactiveLog->id)->assertForbidden();
+    }
+
     public function test_timeline_filters_action_user_auditable_type_dates_search_and_paginates(): void
     {
         $institution = $this->createInstitution('AUDIT-FILTER');

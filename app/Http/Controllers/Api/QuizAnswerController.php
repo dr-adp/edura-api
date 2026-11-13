@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\InstitutionUser;
+use App\Models\CourseEnrollment;
 use App\Models\QuestionBank;
 use App\Models\QuestionOption;
 use App\Models\QuizAnswer;
@@ -11,7 +12,11 @@ use App\Models\QuizAttempt;
 use App\Models\QuizQuestion;
 use App\Models\TeacherProfile;
 use App\Models\User;
+use App\Services\QuizAttemptGradingService;
+use App\Services\CourseAssessmentLockService;
+use App\Services\ParentStudentAccessService;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -23,13 +28,12 @@ use App\Http\Requests\UpdateQuizAnswerRequest;
 
 class QuizAnswerController extends Controller
 {
-    private const ANSWER_RELATIONS = [
-        'quizAttempt.quiz.course',
-        'quizAttempt.studentProfile.user',
-        'quizAttempt.studentProfile.batch',
-        'questionBank.options',
-        'questionOption',
-    ];
+    public function __construct(
+        private QuizAttemptGradingService $quizAttemptGradingService,
+        private CourseAssessmentLockService $courseAssessmentLockService,
+        private ParentStudentAccessService $parentStudentAccessService
+    ) {
+    }
 
     public function index(): JsonResponse
     {
@@ -41,7 +45,7 @@ class QuizAnswerController extends Controller
         | Scoped Answer Listing
         |--------------------------------------------------------------------------
         */
-        $query = QuizAnswer::with(self::ANSWER_RELATIONS);
+        $query = QuizAnswer::with($this->answerRelationsFor($user));
 
         $this->scopeQuizAnswerQuery(
             $query,
@@ -75,78 +79,57 @@ class QuizAnswerController extends Controller
         */
         $validated = $request->validated();
 
-        $attempt = QuizAttempt::with([
-            'quiz.course',
-            'studentProfile',
-        ])->findOrFail(
-            $validated['quiz_attempt_id']
-        );
+        $answer = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use ($validated, $user): QuizAnswer {
+            $attempt = $this->courseAssessmentLockService
+                ->lockAttemptForMutation(
+                    (int) $validated['quiz_attempt_id'],
+                    (int) $validated['question_bank_id'],
+                    isset($validated['question_option_id'])
+                        ? (int) $validated['question_option_id']
+                        : null
+                );
 
-        /*
-        |--------------------------------------------------------------------------
-        | Ownership Check
-        |--------------------------------------------------------------------------
-        */
-        $this->authorizeQuizAttemptAccess(
-            $attempt,
-            $user
-        );
+            $this->authorizeQuizAttemptAccess($attempt, $user);
+            $this->authorizeQuizAttemptAnswerSubmission($attempt, $user);
 
-        $this->authorizeQuizAttemptAnswerSubmission(
-            $attempt,
-            $user
-        );
+            $quizQuestion = $this->resolveQuizQuestion(
+                $attempt,
+                (int) $validated['question_bank_id']
+            );
+            $option = $this->resolveQuestionOption(
+                $attempt,
+                $validated['question_option_id'] ?? null,
+                (int) $validated['question_bank_id']
+            );
 
-        /*
-        |--------------------------------------------------------------------------
-        | Quiz Question Check
-        |--------------------------------------------------------------------------
-        */
-        $quizQuestion = $this->resolveQuizQuestion(
-            $attempt,
-            (int) $validated['question_bank_id']
-        );
+            if ($this->courseAssessmentLockService->lockQuizAnswerForQuestion(
+                (int) $attempt->id,
+                (int) $validated['question_bank_id']
+            )) {
+                throw ValidationException::withMessages([
+                    'question_bank_id' => 'This question has already been answered for this attempt.',
+                ]);
+            }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Option Integrity Check
-        |--------------------------------------------------------------------------
-        */
-        $option = $this->resolveQuestionOption(
-            $validated['question_option_id'] ?? null,
-            (int) $validated['question_bank_id']
-        );
+            $marksForQuestion = $quizQuestion->marks ?? 0;
+            $isCorrect = (bool) ($option && $option->is_correct);
 
-        $marksForQuestion = $quizQuestion->marks ?? 0;
-        $isCorrect = false;
-        $marksObtained = 0;
+            $answer = QuizAnswer::create([
+                'quiz_attempt_id' => $attempt->id,
+                'question_bank_id' => $validated['question_bank_id'],
+                'question_option_id' => $validated['question_option_id'] ?? null,
+                'answer_text' => $validated['answer_text'] ?? null,
+                'is_correct' => $isCorrect,
+                'marks_obtained' => $isCorrect ? $marksForQuestion : 0,
+            ]);
 
-        if ($option && $option->is_correct) {
-            $isCorrect = true;
-            $marksObtained = $marksForQuestion;
-        }
+            $this->recalculateQuizAttempt($attempt);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Create Answer
-        |--------------------------------------------------------------------------
-        */
-        $answer = QuizAnswer::create([
-            'quiz_attempt_id' => $validated['quiz_attempt_id'],
-            'question_bank_id' => $validated['question_bank_id'],
-            'question_option_id' => $validated['question_option_id'] ?? null,
-            'answer_text' => $validated['answer_text'] ?? null,
-            'is_correct' => $isCorrect,
-            'marks_obtained' => $marksObtained,
-        ]);
+            return $answer;
+            });
 
-        $this->recalculateQuizAttempt(
-            $attempt
-        );
-
-        $answer->load(
-            self::ANSWER_RELATIONS
-        );
+        $answer->load($this->answerRelationsFor($user));
 
         $this->sanitizeAnswerForUser(
             $answer,
@@ -164,9 +147,7 @@ class QuizAnswerController extends Controller
         /** @var User $user */
         $user = Auth::user();
 
-        $quizAnswer->load(
-            self::ANSWER_RELATIONS
-        );
+        $quizAnswer->load($this->answerRelationsFor($user));
 
         /*
         |--------------------------------------------------------------------------
@@ -196,33 +177,41 @@ class QuizAnswerController extends Controller
 
         /** @var User $user */
         $user = Auth::user();
-
-        $quizAnswer->load(
-            self::ANSWER_RELATIONS
-        );
-
-        /*
-        |--------------------------------------------------------------------------
-        | Ownership Check
-        |--------------------------------------------------------------------------
-        */
-        $this->authorizeQuizAnswerMutation(
-            $quizAnswer,
-            $user
-        );
-
-        /*
-        |--------------------------------------------------------------------------
-        | Validation
-        |--------------------------------------------------------------------------
-        */
         $validated = $request->validated();
+        $answerId = (int) $quizAnswer->id;
 
-        $attempt = $quizAnswer->quizAttempt;
-        $quizQuestion = $this->resolveQuizQuestion(
-            $attempt,
-            (int) $quizAnswer->question_bank_id
-        );
+        $quizAnswer = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use (
+            $answerId,
+            $validated,
+            $user
+        ): QuizAnswer {
+            $answerIdentity = QuizAnswer::query()->findOrFail($answerId);
+            $questionOptionId = array_key_exists('question_option_id', $validated)
+                ? ($validated['question_option_id'] === null
+                    ? null
+                    : (int) $validated['question_option_id'])
+                : ($answerIdentity->question_option_id === null
+                    ? null
+                    : (int) $answerIdentity->question_option_id);
+            $attempt = $this->courseAssessmentLockService
+                ->lockAttemptForMutation(
+                    (int) $answerIdentity->quiz_attempt_id,
+                    (int) $answerIdentity->question_bank_id,
+                    $questionOptionId
+                );
+
+            $quizAnswer = $this->courseAssessmentLockService
+                ->lockQuizAnswerForAttempt($answerId, (int) $attempt->id)
+                ->load($this->answerRelationsFor($user));
+            $quizAnswer->setRelation('quizAttempt', $attempt);
+
+            $this->authorizeQuizAnswerMutation($quizAnswer, $user);
+
+            $quizQuestion = $this->resolveQuizQuestion(
+                $attempt,
+                (int) $quizAnswer->question_bank_id
+            );
 
         /*
         |--------------------------------------------------------------------------
@@ -255,6 +244,7 @@ class QuizAnswerController extends Controller
         */
         if (array_key_exists('question_option_id', $validated)) {
             $option = $this->resolveQuestionOption(
+                $attempt,
                 $validated['question_option_id'],
                 (int) $quizAnswer->question_bank_id
             );
@@ -266,6 +256,24 @@ class QuizAnswerController extends Controller
                 $validated['is_correct'] = true;
                 $validated['marks_obtained'] = $quizQuestion->marks ?? 0;
             }
+        }
+
+        if (
+            ! $this->isStudentScoped($user) &&
+            array_key_exists('is_correct', $validated) &&
+            (
+                ! array_key_exists('marks_obtained', $validated) ||
+                $validated['marks_obtained'] === null
+            ) &&
+            in_array(
+                $quizAnswer->questionBank?->question_type,
+                QuestionBank::MANUAL_QUESTION_TYPES,
+                true
+            )
+        ) {
+            throw ValidationException::withMessages([
+                'marks_obtained' => 'Explicit marks are required to grade a manual answer.',
+            ]);
         }
 
         /*
@@ -297,19 +305,14 @@ class QuizAnswerController extends Controller
             $validated['manually_graded_at'] = now();
         }
 
-        $quizAnswer->update(
-            $validated
-        );
+            $quizAnswer->update($validated);
 
-        $this->recalculateQuizAttempt(
-            $attempt
-        );
+            $this->recalculateQuizAttempt($attempt);
 
-        $quizAnswer = $quizAnswer
-            ->fresh()
-            ->load(
-                self::ANSWER_RELATIONS
-            );
+            return $quizAnswer
+                ->fresh()
+                ->load($this->answerRelationsFor($user));
+            });
 
         $this->sanitizeAnswerForUser(
             $quizAnswer,
@@ -326,46 +329,38 @@ class QuizAnswerController extends Controller
     {
         /** @var User $user */
         $user = Auth::user();
+        $answerId = (int) $quizAnswer->id;
 
-        $quizAnswer->load([
-            'quizAttempt.quiz',
-            'quizAttempt.studentProfile',
-        ]);
+        $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use ($answerId, $user): void {
+            $answerIdentity = QuizAnswer::query()->findOrFail($answerId);
+            $attempt = $this->courseAssessmentLockService
+                ->lockAttemptForMutation(
+                    (int) $answerIdentity->quiz_attempt_id,
+                    (int) $answerIdentity->question_bank_id,
+                    $answerIdentity->question_option_id === null
+                        ? null
+                        : (int) $answerIdentity->question_option_id
+                );
 
-        /*
-        |--------------------------------------------------------------------------
-        | Ownership Check
-        |--------------------------------------------------------------------------
-        */
-        $this->authorizeQuizAnswerMutation(
-            $quizAnswer,
-            $user
-        );
+            $answer = $this->courseAssessmentLockService
+                ->lockQuizAnswerForAttempt($answerId, (int) $attempt->id)
+                ->load(['quizAttempt.quiz', 'quizAttempt.studentProfile']);
+            $answer->setRelation('quizAttempt', $attempt);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Delete Role Protection
-        |--------------------------------------------------------------------------
-        */
-        if (
-            ! $user->hasRole('super-admin') &&
-            ! $user->hasRole('institution-admin') &&
-            ! $this->isStudentScoped($user)
-        ) {
+            $this->authorizeQuizAnswerMutation($answer, $user);
 
-            abort(
-                403,
-                'Unauthorized: You cannot delete quiz answers.'
-            );
-        }
+            if (
+                ! $user->hasRole('super-admin') &&
+                ! $user->hasRole('institution-admin') &&
+                ! $this->isStudentScoped($user)
+            ) {
+                abort(403, 'Unauthorized: You cannot delete quiz answers.');
+            }
 
-        $attempt = $quizAnswer->quizAttempt;
-
-        $quizAnswer->delete();
-
-        $this->recalculateQuizAttempt(
-            $attempt
-        );
+            $answer->delete();
+            $this->recalculateQuizAttempt($attempt);
+            });
 
         return response()->json([
             'message' => 'Quiz answer deleted successfully.',
@@ -510,22 +505,13 @@ class QuizAnswerController extends Controller
         |--------------------------------------------------------------------------
         */
         if ($user->hasRole('parent')) {
-            $parentProfile = $user->parentProfile;
-
-            if (! $parentProfile) {
-                abort(
-                    403,
-                    'Unauthorized: Parent profile not found.'
-                );
-            }
-
             $query->whereHas(
                 'quizAttempt',
-                function (Builder $q) use ($parentProfile) {
-
-                    $q->where(
-                        'student_profile_id',
-                        $parentProfile->student_profile_id
+                function (Builder $attemptQuery) use ($user) {
+                    $this->parentStudentAccessService->scopeStudentRecords(
+                        $attemptQuery,
+                        $user,
+                        'quiz_attempts.student_profile_id'
                     );
                 }
             );
@@ -692,12 +678,12 @@ class QuizAnswerController extends Controller
         |--------------------------------------------------------------------------
         */
         if ($this->isStudentScoped($user)) {
-            $studentProfile = $user->studentProfile;
+            $studentProfile = $attempt->studentProfile;
 
             if (
                 $studentProfile &&
-                (int) $studentProfile->id ===
-                (int) $attempt->student_profile_id
+                (int) $studentProfile->user_id === (int) $user->id &&
+                (int) $studentProfile->id === (int) $attempt->student_profile_id
             ) {
 
                 return;
@@ -715,12 +701,11 @@ class QuizAnswerController extends Controller
         |--------------------------------------------------------------------------
         */
         if ($this->isParentScoped($user)) {
-            $parentProfile = $user->parentProfile;
-
             if (
-                $parentProfile &&
-                (int) $parentProfile->student_profile_id ===
-                (int) $attempt->student_profile_id
+                $this->parentStudentAccessService->allowsStudent(
+                    $user,
+                    (int) $attempt->student_profile_id
+                )
             ) {
 
                 return;
@@ -804,7 +789,7 @@ class QuizAnswerController extends Controller
         |--------------------------------------------------------------------------
         */
         if ($this->isStudentScoped($user)) {
-            $studentProfile = $user->studentProfile;
+            $studentProfile = $attempt->studentProfile;
 
             if (! $studentProfile) {
                 abort(
@@ -813,10 +798,6 @@ class QuizAnswerController extends Controller
                 );
             }
 
-            $attempt->loadMissing([
-                'quiz',
-            ]);
-
             if (! $attempt->quiz) {
                 abort(
                     403,
@@ -824,27 +805,26 @@ class QuizAnswerController extends Controller
                 );
             }
 
-            $isEnrolled = $studentProfile
-                ->courseEnrollments()
-                ->institutionallyConsistent()
-                ->where(
-                    'course_id',
-                    $attempt->quiz->course_id
-                )
-                ->whereIn(
-                    'status',
-                    [
-                        'active',
-                        'completed',
-                    ]
-                )
-                ->exists();
-
-            if (! $isEnrolled) {
+            if ((int) $studentProfile->user_id !== (int) $user->id) {
                 abort(
                     403,
-                    'You are not enrolled in this course.'
+                    'Unauthorized: You can only submit answers for yourself.'
                 );
+            }
+
+            $course = $attempt->quiz->course;
+            $enrollment = $attempt->getRelation('courseEnrollment');
+            $isEnrolled = $enrollment instanceof CourseEnrollment &&
+                ! $enrollment->trashed() &&
+                (int) $enrollment->course_id === (int) $course->id &&
+                (int) $enrollment->student_profile_id === (int) $studentProfile->id &&
+                in_array($enrollment->status, ['active', 'completed'], true) &&
+                $course->institution_id !== null &&
+                $studentProfile->institution_id !== null &&
+                (int) $course->institution_id === (int) $studentProfile->institution_id;
+
+            if (! $isEnrolled) {
+                abort(403, 'You are not enrolled in this course.');
             }
         }
     }
@@ -937,11 +917,7 @@ class QuizAnswerController extends Controller
 
     private function isPendingManualAnswer(QuizAnswer $answer): bool
     {
-        return in_array(
-            $answer->questionBank?->question_type,
-            QuestionBank::MANUAL_QUESTION_TYPES,
-            true
-        ) && $answer->manually_graded_at === null;
+        return $this->quizAttemptGradingService->isPendingManualAnswer($answer);
     }
 
     private function resolveQuizQuestion(
@@ -949,17 +925,15 @@ class QuizAnswerController extends Controller
         int $questionBankId
     ): QuizQuestion {
 
-        $quizQuestion = QuizQuestion::where(
-            'quiz_id',
-            $attempt->quiz_id
-        )
-            ->where(
-                'question_bank_id',
-                $questionBankId
-            )
-            ->first();
+        $quizQuestion = $attempt->getRelation('lockedQuizQuestion');
+        $questionBank = QuestionBank::query()->find($questionBankId);
 
-        if (! $quizQuestion) {
+        if (
+            ! $quizQuestion ||
+            (int) $quizQuestion->quiz_id !== (int) $attempt->quiz_id ||
+            (int) $quizQuestion->question_bank_id !== $questionBankId ||
+            ! $questionBank
+        ) {
             throw ValidationException::withMessages([
                 'question_bank_id' => 'This question does not belong to the selected quiz attempt.',
             ]);
@@ -969,6 +943,7 @@ class QuizAnswerController extends Controller
     }
 
     private function resolveQuestionOption(
+        QuizAttempt $attempt,
         ?int $questionOptionId,
         int $questionBankId
     ): ?QuestionOption {
@@ -977,17 +952,13 @@ class QuizAnswerController extends Controller
             return null;
         }
 
-        $option = QuestionOption::where(
-            'id',
-            $questionOptionId
-        )
-            ->where(
-                'question_bank_id',
-                $questionBankId
-            )
-            ->first();
+        $option = $attempt->getRelation('lockedQuestionOption');
 
-        if (! $option) {
+        if (
+            ! $option ||
+            (int) $option->id !== $questionOptionId ||
+            (int) $option->question_bank_id !== $questionBankId
+        ) {
             throw ValidationException::withMessages([
                 'question_option_id' => 'Selected option does not belong to this question.',
             ]);
@@ -1017,19 +988,43 @@ class QuizAnswerController extends Controller
         User $user
     ): QuizAnswer {
 
+        $attempt = $answer->quizAttempt;
+        $hasPendingManualAnswers = false;
+
+        if ($this->isLearnerScoped($user) && $attempt) {
+            $hasPendingManualAnswers = $this->quizAttemptGradingService
+                ->redactPendingAttemptResults($attempt);
+        }
+
+        if ($hasPendingManualAnswers) {
+            $this->hideAnswerEvaluationFields($answer, true);
+
+            return $answer;
+        }
+
         if (! $this->shouldHideEvaluation($answer, $user)) {
             return $answer;
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Hide Evaluation Fields
-        |--------------------------------------------------------------------------
-        */
-        $answer->makeHidden([
+        $this->hideAnswerEvaluationFields($answer);
+
+        return $answer;
+    }
+
+    private function hideAnswerEvaluationFields(
+        QuizAnswer $answer,
+        bool $hideManualGradingMarker = false
+    ): void {
+        $hiddenFields = [
             'is_correct',
             'marks_obtained',
-        ]);
+        ];
+
+        if ($hideManualGradingMarker) {
+            $hiddenFields[] = 'manually_graded_at';
+        }
+
+        $answer->makeHidden($hiddenFields);
 
         if (
             $answer->relationLoaded('questionOption') &&
@@ -1056,8 +1051,31 @@ class QuizAnswerController extends Controller
                 ]);
             });
         }
+    }
 
-        return $answer;
+    private function answerRelationsFor(User $user): array
+    {
+        return [
+            'quizAttempt' => function (Relation $query) use ($user) {
+                if ($this->isLearnerScoped($user)) {
+                    $this->quizAttemptGradingService
+                        ->withPendingManualAnswersFlag($query);
+                }
+
+                $query->with([
+                    'quiz.course',
+                    'studentProfile.user',
+                    'studentProfile.batch',
+                ]);
+            },
+            'questionBank.options',
+            'questionOption',
+        ];
+    }
+
+    private function isLearnerScoped(User $user): bool
+    {
+        return $this->isStudentScoped($user) || $this->isParentScoped($user);
     }
 
     private function shouldHideEvaluation(
@@ -1107,101 +1125,8 @@ class QuizAnswerController extends Controller
         );
     }
 
-    private function recalculateQuizAttempt(
-        QuizAttempt $attempt
-    ): void {
-
-        $attempt->loadMissing([
-            'quiz',
-            'answers.questionBank',
-        ]);
-
-        /*
-    |--------------------------------------------------------------------------
-    | Marks Calculation
-    |--------------------------------------------------------------------------
-    */
-        $marksObtained = $attempt->answers
-            ->sum('marks_obtained');
-
-        $totalMarks = $attempt->total_marks > 0
-            ? $attempt->total_marks
-            : 1;
-
-        $percentage = round(
-            ($marksObtained / $totalMarks) * 100,
-            2
-        );
-
-        /*
-    |--------------------------------------------------------------------------
-    | Pass / Fail
-    |--------------------------------------------------------------------------
-    */
-        $passingMarks = $attempt->quiz->passing_marks ?? 0;
-
-        $passPercentage = $totalMarks > 0
-            ? ($passingMarks / $totalMarks) * 100
-            : 0;
-
-        $resultStatus = $percentage >= $passPercentage
-            ? 'passed'
-            : 'failed';
-
-        /*
-    |--------------------------------------------------------------------------
-    | Manual Evaluation Detection
-    |--------------------------------------------------------------------------
-    */
-        $requiresManualEvaluation = $attempt->answers
-            ->contains(function ($answer) {
-
-                $type = $answer->questionBank?->question_type;
-
-                return in_array($type, QuestionBank::MANUAL_QUESTION_TYPES, true);
-            });
-
-        /*
-    |--------------------------------------------------------------------------
-    | Unevaluated Manual Answers
-    |--------------------------------------------------------------------------
-    */
-        $pendingManualEvaluation = $attempt->answers
-            ->contains(fn ($answer) => $this->isPendingManualAnswer($answer));
-
-        if ($pendingManualEvaluation) {
-            $resultStatus = 'pending';
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Attempt Status
-    |--------------------------------------------------------------------------
-    */
-        $status = $attempt->status;
-
-        if ($pendingManualEvaluation && $status === 'evaluated') {
-            $status = 'submitted';
-        }
-
-        if (
-            $status === 'submitted'
-            &&
-            (
-                ! $requiresManualEvaluation
-                ||
-                ! $pendingManualEvaluation
-            )
-        ) {
-
-            $status = 'evaluated';
-        }
-
-        $attempt->update([
-            'marks_obtained' => $marksObtained,
-            'percentage' => $percentage,
-            'result_status' => $resultStatus,
-            'status' => $status,
-        ]);
+    private function recalculateQuizAttempt(QuizAttempt $attempt): void
+    {
+        $this->quizAttemptGradingService->recalculate($attempt);
     }
 }

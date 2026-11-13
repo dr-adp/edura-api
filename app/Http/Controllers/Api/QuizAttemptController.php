@@ -15,9 +15,19 @@ use App\Models\User;
 use App\Models\CourseEnrollment;
 use App\Http\Requests\StoreQuizAttemptRequest;
 use App\Http\Requests\UpdateQuizAttemptRequest;
+use App\Services\QuizAttemptGradingService;
+use App\Services\CourseAssessmentLockService;
+use App\Services\ParentStudentAccessService;
 
 class QuizAttemptController extends Controller
 {
+    public function __construct(
+        private QuizAttemptGradingService $quizAttemptGradingService,
+        private CourseAssessmentLockService $courseAssessmentLockService,
+        private ParentStudentAccessService $parentStudentAccessService
+    ) {
+    }
+
     public function index(): JsonResponse
     {
         /** @var User $user */
@@ -65,19 +75,10 @@ class QuizAttemptController extends Controller
     |--------------------------------------------------------------------------
     */ elseif ($user->hasRole('parent')) {
 
-            $parentProfile = $user->parentProfile;
-
-            if (!$parentProfile) {
-
-                abort(
-                    403,
-                    'Parent profile not found.'
-                );
-            }
-
-            $query->where(
-                'student_profile_id',
-                $parentProfile->student_profile_id
+            $this->parentStudentAccessService->scopeStudentRecords(
+                $query,
+                $user,
+                'quiz_attempts.student_profile_id'
             );
         }
 
@@ -166,11 +167,22 @@ class QuizAttemptController extends Controller
             );
         }
 
+        if ($this->shouldRedactPendingManualResults($user)) {
+            $this->quizAttemptGradingService
+                ->withPendingManualAnswersFlag($query);
+        }
+
+        $attempts = $query
+            ->latest()
+            ->paginate(20);
+
+        $attempts->getCollection()->each(function (QuizAttempt $attempt) use ($user) {
+            $this->sanitizeAttemptForUser($attempt, $user);
+        });
+
         return response()->json([
             'message' => 'Quiz attempts fetched successfully.',
-            'data' => $query
-                ->latest()
-                ->paginate(20),
+            'data' => $attempts,
         ]);
     }
 
@@ -181,14 +193,20 @@ class QuizAttemptController extends Controller
         /** @var User $user */
         $user = Auth::user();
 
-        $quiz = Quiz::with('course')
-            ->findOrFail(
-                $validated['quiz_id']
-            );
-
-        $studentProfile = StudentProfile::findOrFail(
-            $validated['student_profile_id']
-        );
+        $attempt = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use ($validated, $user): QuizAttempt {
+                $locked = $this->courseAssessmentLockService
+                    ->lockQuizForAttemptCreation(
+                        (int) $validated['quiz_id'],
+                        (int) $validated['student_profile_id']
+                    );
+                /** @var Quiz $quiz */
+                $quiz = $locked['quiz'];
+                /** @var StudentProfile $studentProfile */
+                $studentProfile = $locked['student'];
+                /** @var CourseEnrollment|null $enrollment */
+                $enrollment = $locked['enrollment'];
+                $attempts = $locked['attempts'];
 
         /*
     |--------------------------------------------------------------------------
@@ -196,16 +214,8 @@ class QuizAttemptController extends Controller
     |--------------------------------------------------------------------------
     */
         if ($user->hasRole('student')) {
-
-            $currentStudent = StudentProfile::where(
-                'user_id',
-                $user->id
-            )->first();
-
             if (
-                !$currentStudent ||
-                (int) $currentStudent->id !==
-                (int) $studentProfile->id
+                (int) $studentProfile->user_id !== (int) $user->id
             ) {
 
                 abort(
@@ -312,7 +322,8 @@ class QuizAttemptController extends Controller
     */
         $this->validateQuizAttemptEnrollment(
             $quiz,
-            $studentProfile
+            $studentProfile,
+            $enrollment
         );
 
         /*
@@ -347,15 +358,10 @@ class QuizAttemptController extends Controller
     | Maximum Attempts
     |--------------------------------------------------------------------------
     */
-        $currentAttempts = QuizAttempt::where(
-            'quiz_id',
-            $quiz->id
-        )
-            ->where(
-                'student_profile_id',
-                $studentProfile->id
-            )
-            ->count();
+        $activeAttempts = $attempts->filter(
+            static fn (QuizAttempt $existing): bool => $existing->deleted_at === null
+        );
+        $currentAttempts = $activeAttempts->count();
 
         if (
             $quiz->maximum_attempts &&
@@ -373,19 +379,9 @@ class QuizAttemptController extends Controller
     | Existing In Progress Attempt
     |--------------------------------------------------------------------------
     */
-        $hasOpenAttempt = QuizAttempt::where(
-            'quiz_id',
-            $quiz->id
-        )
-            ->where(
-                'student_profile_id',
-                $studentProfile->id
-            )
-            ->where(
-                'status',
-                'in_progress'
-            )
-            ->exists();
+        $hasOpenAttempt = $activeAttempts->contains(
+            static fn (QuizAttempt $existing): bool => $existing->status === 'in_progress'
+        );
 
         if ($hasOpenAttempt) {
 
@@ -400,29 +396,22 @@ class QuizAttemptController extends Controller
     | Attempt Number
     |--------------------------------------------------------------------------
     */
-        $lastAttemptNumber = QuizAttempt::where(
-            'quiz_id',
-            $quiz->id
-        )
-            ->where(
-                'student_profile_id',
-                $studentProfile->id
-            )
-            ->max(
-                'attempt_number'
-            );
+        $lastAttemptNumber = $attempts->max('attempt_number');
 
-        $attempt = QuizAttempt::create([
-            'quiz_id' => $quiz->id,
-            'student_profile_id' => $studentProfile->id,
-            'attempt_number' => ($lastAttemptNumber ?? 0) + 1,
-            'started_at' => now(),
-            'total_marks' => $quiz->total_marks,
-            'marks_obtained' => 0,
-            'percentage' => 0,
-            'result_status' => 'pending',
-            'status' => 'in_progress',
-        ]);
+                return QuizAttempt::create([
+                'quiz_id' => $quiz->id,
+                'student_profile_id' => $studentProfile->id,
+                'attempt_number' => ($lastAttemptNumber ?? 0) + 1,
+                'started_at' => now(),
+                'total_marks' => $quiz->total_marks,
+                'marks_obtained' => 0,
+                'percentage' => 0,
+                'result_status' => 'pending',
+                'status' => 'in_progress',
+            ]);
+            });
+
+        $this->sanitizeAttemptForUser($attempt, $user);
 
         return response()->json([
             'message' => 'Quiz attempt started successfully.',
@@ -436,7 +425,11 @@ class QuizAttemptController extends Controller
 
     public function show(QuizAttempt $quizAttempt): JsonResponse
     {
+        /** @var User $user */
+        $user = Auth::user();
+
         $this->authorizeQuizAttemptAccess($quizAttempt);
+        $this->sanitizeAttemptForUser($quizAttempt, $user);
 
         return response()->json([
             'message' => 'Quiz attempt fetched successfully.',
@@ -458,140 +451,97 @@ class QuizAttemptController extends Controller
 
         /*
     |--------------------------------------------------------------------------
-    | Centralized Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeQuizAttemptAccess(
-            $quizAttempt
-        );
-
-        /*
-    |--------------------------------------------------------------------------
-    | Lock Final States
-    |--------------------------------------------------------------------------
-    */
-        if (
-            in_array(
-                $quizAttempt->status,
-                [
-                    'evaluated',
-                    'cancelled',
-                ],
-                true
-            )
-        ) {
-
-            abort(
-                403,
-                'This attempt can no longer be modified.'
-            );
-        }
-
-        /*
-    |--------------------------------------------------------------------------
     | Validation
     |--------------------------------------------------------------------------
     */
         $validated = $request->validated();
+        $attemptId = (int) $quizAttempt->id;
+        $attempt = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use (
+                $attemptId,
+                $validated,
+                $user
+            ): QuizAttempt {
+                $attempt = $this->courseAssessmentLockService
+                    ->lockAttemptForMutation($attemptId);
 
-        /*
-    |--------------------------------------------------------------------------
-    | Students
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('student')) {
+                $this->authorizeQuizAttemptAccess($attempt);
+                $this->validateLockedAttemptEnrollment($attempt);
 
-            /*
-        |--------------------------------------------------------------------------
-        | Students cannot reopen submitted attempts
-        |--------------------------------------------------------------------------
-        */
-            if (
-                $quizAttempt->status === 'submitted'
-            ) {
+                if (in_array($attempt->status, ['evaluated', 'cancelled'], true)) {
+                    abort(403, 'This attempt can no longer be modified.');
+                }
 
-                abort(
-                    403,
-                    'Submitted attempts cannot be modified.'
-                );
-            }
+                if ($user->hasRole('student')) {
+                    if ($attempt->status === 'submitted') {
+                        abort(403, 'Submitted attempts cannot be modified.');
+                    }
 
-            /*
-        |--------------------------------------------------------------------------
-        | Students may only submit
-        |--------------------------------------------------------------------------
-        */
-            if (
-                $validated['status'] !== 'submitted'
-            ) {
+                    if ($validated['status'] !== 'submitted') {
+                        abort(403, 'Invalid status transition.');
+                    }
 
-                abort(
-                    403,
-                    'Invalid status transition.'
-                );
-            }
+                    $validated['submitted_at'] = now();
+                }
 
-            $validated['submitted_at'] = now();
-        }
+                if ($user->hasRole('parent')) {
+                    abort(403, 'Parents cannot modify quiz attempts.');
+                }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Parents
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('parent')) {
+                if (
+                    $user->hasAnyRole([
+                        'teacher',
+                        'institution-admin',
+                        'super-admin',
+                    ]) &&
+                    $validated['status'] === 'submitted'
+                ) {
+                    abort(403, 'Staff cannot submit attempts.');
+                }
 
-            abort(
-                403,
-                'Parents cannot modify quiz attempts.'
-            );
-        }
+                $attempt->update($validated);
 
-        /*
-    |--------------------------------------------------------------------------
-    | Teachers / Institution Admins / Super Admins
-    |--------------------------------------------------------------------------
-    */
-        if (
-            $user->hasAnyRole([
-                'teacher',
-                'institution-admin',
-                'super-admin',
-            ])
-        ) {
+                if ($validated['status'] === 'submitted') {
+                    $attempt->setRelation(
+                        'answers',
+                        $this->courseAssessmentLockService
+                            ->lockQuizAnswersForAttempt($attemptId)
+                    );
+                    $this->quizAttemptGradingService->recalculate($attempt);
+                }
 
-            /*
-        |--------------------------------------------------------------------------
-        | Staff cannot manually evaluate attempts
-        |--------------------------------------------------------------------------
-        | Evaluation is derived from QuizAnswerController.
-        |--------------------------------------------------------------------------
-        */
-            if (
-                $validated['status'] === 'submitted'
-            ) {
-
-                abort(
-                    403,
-                    'Staff cannot submit attempts.'
-                );
-            }
-        }
-
-        $quizAttempt->update(
-            $validated
-        );
-
-        return response()->json([
-            'message' => 'Quiz attempt updated successfully.',
-            'data' => $quizAttempt
-                ->fresh()
-                ->load([
+                return $attempt->loadMissing([
                     'quiz.course',
                     'studentProfile.user',
                     'studentProfile.batch',
-                ]),
+                ]);
+            });
+
+        $this->sanitizeAttemptForUser($attempt, $user);
+
+        return response()->json([
+            'message' => 'Quiz attempt updated successfully.',
+            'data' => $attempt,
         ]);
+    }
+
+    private function sanitizeAttemptForUser(QuizAttempt $attempt, User $user): void
+    {
+        if (! $this->shouldRedactPendingManualResults($user)) {
+            return;
+        }
+
+        $this->quizAttemptGradingService->redactPendingAttemptResults($attempt);
+    }
+
+    private function shouldRedactPendingManualResults(User $user): bool
+    {
+        return $user->hasAnyRole(['student', 'parent']) &&
+            ! $user->hasAnyRole([
+                'super-admin',
+                'institution-admin',
+                'teacher',
+            ]);
     }
 
     public function destroy(QuizAttempt $quizAttempt): JsonResponse
@@ -610,9 +560,18 @@ class QuizAttemptController extends Controller
             );
         }
 
-        $this->authorizeQuizAttemptAccess($quizAttempt);
+        $attemptId = (int) $quizAttempt->id;
+        $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use ($attemptId): void {
+                $attempt = $this->courseAssessmentLockService
+                    ->lockAttemptForMutation($attemptId);
 
-        $quizAttempt->delete();
+                $this->authorizeQuizAttemptAccess($attempt);
+                $this->validateLockedAttemptEnrollment($attempt);
+                $this->courseAssessmentLockService
+                    ->lockQuizAnswersForAttempt($attemptId);
+                $attempt->delete();
+            });
 
         return response()->json([
             'message' => 'Quiz attempt deleted successfully.',
@@ -734,16 +693,9 @@ class QuizAttemptController extends Controller
     |--------------------------------------------------------------------------
     */
         if ($user->hasRole('student')) {
-
-            $studentProfile = StudentProfile::where(
-                'user_id',
-                $user->id
-            )->first();
-
             if (
-                !$studentProfile ||
-                (int) $studentProfile->id !==
-                (int) $quizAttempt->student_profile_id
+                ! $quizAttempt->studentProfile ||
+                (int) $quizAttempt->studentProfile->user_id !== (int) $user->id
             ) {
 
                 abort(
@@ -762,19 +714,11 @@ class QuizAttemptController extends Controller
     */
         if ($user->hasRole('parent')) {
 
-            $parentProfile = $user->parentProfile;
-
-            if (
-                !$parentProfile ||
-                (int) $parentProfile->student_profile_id !==
-                (int) $quizAttempt->student_profile_id
-            ) {
-
-                abort(
-                    403,
-                    'Unauthorized parent access.'
-                );
-            }
+            $this->parentStudentAccessService->authorizeStudent(
+                $user,
+                (int) $quizAttempt->student_profile_id,
+                'Unauthorized parent access.'
+            );
 
             return;
         }
@@ -787,26 +731,20 @@ class QuizAttemptController extends Controller
 
     private function validateQuizAttemptEnrollment(
         Quiz $quiz,
-        StudentProfile $studentProfile
+        StudentProfile $studentProfile,
+        ?CourseEnrollment $enrollment
     ): void {
 
-        $enrolled = CourseEnrollment::where(
-            'course_id',
-            $quiz->course_id
-        )
-            ->institutionallyConsistent()
-            ->where(
-                'student_profile_id',
-                $studentProfile->id
-            )
-            ->whereIn(
-                'status',
-                [
-                    'active',
-                    'completed',
-                ]
-            )
-            ->exists();
+        $course = $quiz->course;
+        $enrolled = $enrollment &&
+            ! $enrollment->trashed() &&
+            (int) $enrollment->course_id === (int) $quiz->course_id &&
+            (int) $enrollment->student_profile_id === (int) $studentProfile->id &&
+            in_array($enrollment->status, ['active', 'completed'], true) &&
+            $course &&
+            $course->institution_id !== null &&
+            $studentProfile->institution_id !== null &&
+            (int) $course->institution_id === (int) $studentProfile->institution_id;
 
         if (!$enrolled) {
 
@@ -814,6 +752,30 @@ class QuizAttemptController extends Controller
                 403,
                 'Student is not enrolled in this course.'
             );
+        }
+    }
+
+    private function validateLockedAttemptEnrollment(QuizAttempt $attempt): void
+    {
+        $quiz = $attempt->quiz;
+        $course = $quiz?->course;
+        $student = $attempt->studentProfile;
+        $enrollment = $attempt->getRelation('courseEnrollment');
+
+        $eligible = $quiz &&
+            $course &&
+            $student &&
+            $enrollment instanceof CourseEnrollment &&
+            ! $enrollment->trashed() &&
+            (int) $enrollment->course_id === (int) $course->id &&
+            (int) $enrollment->student_profile_id === (int) $student->id &&
+            in_array($enrollment->status, ['active', 'completed'], true) &&
+            $course->institution_id !== null &&
+            $student->institution_id !== null &&
+            (int) $course->institution_id === (int) $student->institution_id;
+
+        if (! $eligible) {
+            abort(403, 'Student is not enrolled in this course.');
         }
     }
 }

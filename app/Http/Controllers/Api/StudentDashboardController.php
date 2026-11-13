@@ -11,11 +11,17 @@ use App\Models\LiveClass;
 use App\Models\QuizAttempt;
 use App\Models\StudentProfile;
 use App\Models\User;
+use App\Services\QuizAttemptGradingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
 
 class StudentDashboardController extends Controller
 {
+    public function __construct(
+        private QuizAttemptGradingService $quizAttemptGradingService
+    ) {
+    }
+
     public function show(StudentProfile $studentProfile): JsonResponse
     {
         /** @var User $user */
@@ -163,7 +169,6 @@ class StudentDashboardController extends Controller
             'institution',
             'department',
             'batch',
-            'certificates',
         ]);
 
         $studentProfile->setRelation(
@@ -180,13 +185,45 @@ class StudentDashboardController extends Controller
                 ->with('assignment')
                 ->get()
         );
-        $studentProfile->setRelation(
-            'quizAttempts',
-            QuizAttempt::institutionallyConsistent()
-                ->where('student_profile_id', $studentProfile->id)
-                ->with('quiz')
-                ->get()
-        );
+        $quizAttemptQuery = QuizAttempt::institutionallyConsistent()
+            ->where('student_profile_id', $studentProfile->id);
+        $redactPendingQuizResults = $this->isLearnerDashboardViewer($user);
+
+        if ($redactPendingQuizResults) {
+            $this->quizAttemptGradingService
+                ->withPendingManualAnswersFlag($quizAttemptQuery);
+        }
+
+        $quizAttempts = $quizAttemptQuery
+            ->with('quiz')
+            ->get();
+
+        if ($redactPendingQuizResults) {
+            $quizAttempts->each(function (QuizAttempt $attempt) {
+                $this->quizAttemptGradingService
+                    ->redactPendingAttemptResults($attempt);
+            });
+        }
+
+        $studentProfile->setRelation('quizAttempts', $quizAttempts);
+
+        $certificateQuery = $studentProfile->certificates();
+
+        if ($redactPendingQuizResults) {
+            $this->quizAttemptGradingService
+                ->withPendingManualGradingFlagForCertificates($certificateQuery);
+        }
+
+        $certificates = $certificateQuery->get();
+
+        if ($redactPendingQuizResults) {
+            $certificates->each(function ($certificate) {
+                $this->quizAttemptGradingService
+                    ->redactPendingCertificateResults($certificate);
+            });
+        }
+
+        $studentProfile->setRelation('certificates', $certificates);
 
         $enrolledCourses = $studentProfile->courseEnrollments;
 
@@ -236,8 +273,6 @@ class StudentDashboardController extends Controller
 
         $quizAttempts = $studentProfile->quizAttempts;
 
-        $certificates = $studentProfile->certificates;
-
         $overallProgress = round(
             $enrolledCourses->avg('progress_percentage') ?? 0,
             2
@@ -257,5 +292,15 @@ class StudentDashboardController extends Controller
                 'overall_progress' => $overallProgress,
             ],
         ]);
+    }
+
+    private function isLearnerDashboardViewer(User $user): bool
+    {
+        return $user->hasAnyRole(['student', 'parent']) &&
+            ! $user->hasAnyRole([
+                'super-admin',
+                'institution-admin',
+                'teacher',
+            ]);
     }
 }

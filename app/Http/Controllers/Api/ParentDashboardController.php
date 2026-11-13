@@ -13,18 +13,29 @@ use App\Models\Gradebook;
 use App\Models\LiveClass;
 use App\Models\QuizAttempt;
 use App\Models\Certificate;
+use App\Services\ParentStudentAccessService;
+use App\Services\QuizAttemptGradingService;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Controller;
 use Illuminate\Support\Facades\Auth;
 
 class ParentDashboardController extends Controller
 {
+    public function __construct(
+        private ParentStudentAccessService $parentStudentAccessService,
+        private QuizAttemptGradingService $quizAttemptGradingService
+    ) {
+    }
+
     private function getParentProfileForChild(
         StudentProfile $studentProfile
     ): ParentProfile {
-        $parentProfile = ParentProfile::where('user_id', Auth::id())
-            ->where('student_profile_id', $studentProfile->id)
-            ->where('status', 'active')
+        /** @var \App\Models\User $parent */
+        $parent = Auth::user();
+        $parentProfile = $this->parentStudentAccessService
+            ->validLinksFor($parent)
+            ->where('parent_profiles.student_profile_id', $studentProfile->id)
             ->first();
 
         abort_unless(
@@ -66,48 +77,75 @@ class ParentDashboardController extends Controller
             ->with('course')
             ->get();
 
-        $recentAttendance = AttendanceRecord::where('student_profile_id', $studentProfile->id)
+        $attendanceQuery = $this->consistentAttendanceFor($studentProfile);
+
+        $recentAttendance = (clone $attendanceQuery)
             ->with('course')
             ->latest('attendance_date')
             ->take(10)
             ->get();
 
         $attendanceSummary = [
-            'total' => AttendanceRecord::where('student_profile_id', $studentProfile->id)->count(),
-            'present' => AttendanceRecord::where('student_profile_id', $studentProfile->id)
+            'total' => (clone $attendanceQuery)->count(),
+            'present' => (clone $attendanceQuery)
                 ->where('attendance_status', 'present')->count(),
-            'absent' => AttendanceRecord::where('student_profile_id', $studentProfile->id)
+            'absent' => (clone $attendanceQuery)
                 ->where('attendance_status', 'absent')->count(),
-            'late' => AttendanceRecord::where('student_profile_id', $studentProfile->id)
+            'late' => (clone $attendanceQuery)
                 ->where('attendance_status', 'late')->count(),
-            'excused' => AttendanceRecord::where('student_profile_id', $studentProfile->id)
+            'excused' => (clone $attendanceQuery)
                 ->where('attendance_status', 'excused')->count(),
         ];
 
-        $gradebooks = Gradebook::where('student_profile_id', $studentProfile->id)
+        $gradebookQuery = Gradebook::where('student_profile_id', $studentProfile->id)
             ->institutionallyConsistent()
-            ->with('course')
-            ->get();
+            ->with('course');
+        $this->quizAttemptGradingService
+            ->withPendingManualGradingFlag($gradebookQuery);
+        $gradebooks = $gradebookQuery->get();
+        $gradebooks->each(function (Gradebook $gradebook) {
+            $this->quizAttemptGradingService
+                ->redactPendingGradebookResults($gradebook);
+        });
 
         $upcomingLiveClasses = LiveClass::whereHas('course.enrollments', function ($query) use ($studentProfile) {
             $query->institutionallyConsistent()
                 ->where('student_profile_id', $studentProfile->id);
         })
+            ->where('institution_id', $studentProfile->institution_id)
             ->where('scheduled_start_time', '>=', now())
             ->with(['course', 'teacherProfile.user'])
             ->orderBy('scheduled_start_time')
             ->get();
 
-        $quizAttempts = QuizAttempt::where('student_profile_id', $studentProfile->id)
+        $quizAttemptQuery = QuizAttempt::where('student_profile_id', $studentProfile->id)
             ->institutionallyConsistent()
-            ->with('quiz')
+            ->with('quiz');
+        $this->quizAttemptGradingService
+            ->withPendingManualAnswersFlag($quizAttemptQuery);
+        $quizAttempts = $quizAttemptQuery
             ->latest()
             ->get();
+        $quizAttempts->each(function (QuizAttempt $attempt) {
+            $this->quizAttemptGradingService
+                ->redactPendingAttemptResults($attempt);
+        });
 
-        $certificates = Certificate::where('student_profile_id', $studentProfile->id)
-            ->with(['course', 'gradebook'])
+        $certificateQuery = Certificate::where('student_profile_id', $studentProfile->id)
+            ->whereHas('course', function ($query) use ($studentProfile) {
+                $query->where('institution_id', $studentProfile->institution_id);
+            })
+            ->with(['course', 'gradebook']);
+        $this->quizAttemptGradingService
+            ->withPendingManualGradingFlagForCertificates($certificateQuery);
+        $certificates = $certificateQuery
             ->latest('issued_date')
             ->get();
+        $certificates->each(function (Certificate $certificate) {
+            $this->hideInconsistentCertificateGradebook($certificate);
+            $this->quizAttemptGradingService
+                ->redactPendingCertificateResults($certificate);
+        });
 
         return response()->json([
             'message' => 'Parent dashboard fetched successfully.',
@@ -129,13 +167,16 @@ class ParentDashboardController extends Controller
 
     public function children(): JsonResponse
     {
-        $studentProfileIds = ParentProfile::where('user_id', Auth::id())
-            ->where('status', 'active')
-            ->pluck('student_profile_id')
-            ->unique()
-            ->values();
+        /** @var \App\Models\User $parent */
+        $parent = Auth::user();
+        $childrenQuery = StudentProfile::query();
+        $this->parentStudentAccessService->scopeStudentRecords(
+            $childrenQuery,
+            $parent,
+            'student_profiles.id'
+        );
 
-        $children = StudentProfile::whereIn('id', $studentProfileIds)
+        $children = $childrenQuery
             ->with(['user', 'department', 'batch', 'institution'])
             ->get()
             ->map(function ($student) {
@@ -177,24 +218,25 @@ class ParentDashboardController extends Controller
     {
         $this->getParentProfileForChild($studentProfile);
 
-        $attendance = AttendanceRecord::where('student_profile_id', $studentProfile->id)
+        $attendanceQuery = $this->consistentAttendanceFor($studentProfile);
+        $attendance = (clone $attendanceQuery)
             ->with(['course', 'batch'])
             ->latest('attendance_date')
             ->paginate(20);
 
         $summary = [
-            'total' => AttendanceRecord::where('student_profile_id', $studentProfile->id)->count(),
-            'present' => AttendanceRecord::where('student_profile_id', $studentProfile->id)
+            'total' => (clone $attendanceQuery)->count(),
+            'present' => (clone $attendanceQuery)
                 ->where('attendance_status', 'present')->count(),
-            'absent' => AttendanceRecord::where('student_profile_id', $studentProfile->id)
+            'absent' => (clone $attendanceQuery)
                 ->where('attendance_status', 'absent')->count(),
-            'late' => AttendanceRecord::where('student_profile_id', $studentProfile->id)
+            'late' => (clone $attendanceQuery)
                 ->where('attendance_status', 'late')->count(),
-            'half_day' => AttendanceRecord::where('student_profile_id', $studentProfile->id)
+            'half_day' => (clone $attendanceQuery)
                 ->where('attendance_status', 'half_day')->count(),
-            'excused' => AttendanceRecord::where('student_profile_id', $studentProfile->id)
+            'excused' => (clone $attendanceQuery)
                 ->where('attendance_status', 'excused')->count(),
-            'attendance_percentage' => $this->calculateAttendancePercentage($studentProfile->id),
+            'attendance_percentage' => $this->calculateAttendancePercentage($studentProfile),
         ];
 
         return response()->json([
@@ -211,17 +253,30 @@ class ParentDashboardController extends Controller
     {
         $this->getParentProfileForChild($studentProfile);
 
-        $gradebooks = Gradebook::where('student_profile_id', $studentProfile->id)
-            ->with('course')
-            ->get();
+        $gradebookQuery = Gradebook::where('student_profile_id', $studentProfile->id)
+            ->institutionallyConsistent()
+            ->with('course');
+        $this->quizAttemptGradingService
+            ->withPendingManualGradingFlag($gradebookQuery);
+        $gradebooks = $gradebookQuery->get();
 
-        $overallPercentage = round($gradebooks->avg('percentage') ?? 0, 2);
+        $hasPendingManualGrading = false;
+        $gradebooks->each(function (Gradebook $gradebook) use (&$hasPendingManualGrading) {
+            $hasPendingManualGrading =
+                $this->quizAttemptGradingService->redactPendingGradebookResults($gradebook) ||
+                $hasPendingManualGrading;
+        });
+
+        $overallPercentage = $hasPendingManualGrading
+            ? null
+            : round($gradebooks->avg('percentage') ?? 0, 2);
 
         return response()->json([
             'message' => 'Child grades fetched successfully.',
             'data' => [
                 'student' => $studentProfile->load(['user', 'department', 'batch']),
                 'overall_percentage' => $overallPercentage,
+                'grading_pending' => $hasPendingManualGrading,
                 'gradebooks' => $gradebooks,
             ],
         ]);
@@ -231,13 +286,19 @@ class ParentDashboardController extends Controller
     {
         $this->getParentProfileForChild($studentProfile);
 
-        $pendingAssignments = Assignment::whereDoesntHave('submissions', function ($query) use ($studentProfile) {
-            $query->where('student_profile_id', $studentProfile->id);
-        })
+        $courseIds = CourseEnrollment::where('student_profile_id', $studentProfile->id)
+            ->institutionallyConsistent()
+            ->pluck('course_id');
+
+        $pendingAssignments = Assignment::whereIn('course_id', $courseIds)
+            ->whereDoesntHave('submissions', function ($query) use ($studentProfile) {
+                $query->where('student_profile_id', $studentProfile->id);
+            })
             ->with('course')
             ->get();
 
         $submittedAssignments = AssignmentSubmission::where('student_profile_id', $studentProfile->id)
+            ->institutionallyConsistent()
             ->with(['assignment.course', 'evaluation'])
             ->latest()
             ->get();
@@ -279,6 +340,7 @@ class ParentDashboardController extends Controller
             $query->institutionallyConsistent()
                 ->where('student_profile_id', $studentProfile->id);
         })
+            ->where('institution_id', $studentProfile->institution_id)
             ->where('scheduled_start_time', '>=', now())
             ->with(['course', 'teacherProfile.user'])
             ->orderBy('scheduled_start_time')
@@ -288,6 +350,7 @@ class ParentDashboardController extends Controller
             $query->institutionallyConsistent()
                 ->where('student_profile_id', $studentProfile->id);
         })
+            ->where('institution_id', $studentProfile->institution_id)
             ->where('scheduled_start_time', '<', now())
             ->with(['course', 'teacherProfile.user'])
             ->latest('scheduled_start_time')
@@ -303,17 +366,65 @@ class ParentDashboardController extends Controller
         ]);
     }
 
-    private function calculateAttendancePercentage(int $studentProfileId): float
+    private function calculateAttendancePercentage(StudentProfile $studentProfile): float
     {
-        $total = AttendanceRecord::where('student_profile_id', $studentProfileId)->count();
+        $attendanceQuery = $this->consistentAttendanceFor($studentProfile);
+
+        $total = (clone $attendanceQuery)->count();
         if ($total === 0) {
             return 0;
         }
 
-        $present = AttendanceRecord::where('student_profile_id', $studentProfileId)
+        $present = (clone $attendanceQuery)
             ->whereIn('attendance_status', ['present', 'late', 'excused'])
             ->count();
 
         return round(($present / $total) * 100, 2);
+    }
+
+    private function consistentAttendanceFor(StudentProfile $studentProfile): Builder
+    {
+        return AttendanceRecord::query()
+            ->where('student_profile_id', $studentProfile->id)
+            ->where('institution_id', $studentProfile->institution_id)
+            ->where(function (Builder $query) use ($studentProfile): void {
+                $query
+                    ->whereNull('course_id')
+                    ->orWhereHas('course', function (Builder $courseQuery) use ($studentProfile): void {
+                        $courseQuery->where(
+                            'institution_id',
+                            $studentProfile->institution_id
+                        );
+                    });
+            })
+            ->where(function (Builder $query) use ($studentProfile): void {
+                $query
+                    ->whereNull('batch_id')
+                    ->orWhereHas('batch', function (Builder $batchQuery) use ($studentProfile): void {
+                        $batchQuery->where(
+                            'institution_id',
+                            $studentProfile->institution_id
+                        );
+                    });
+            });
+    }
+
+    private function hideInconsistentCertificateGradebook(Certificate $certificate): void
+    {
+        if (! $certificate->relationLoaded('gradebook')) {
+            return;
+        }
+
+        $gradebook = $certificate->getRelation('gradebook');
+
+        if (
+            $gradebook &&
+            (
+                (int) $gradebook->student_profile_id !== (int) $certificate->student_profile_id ||
+                (int) $gradebook->course_id !== (int) $certificate->course_id
+            )
+        ) {
+            $certificate->setRelation('gradebook', null);
+        }
     }
 }

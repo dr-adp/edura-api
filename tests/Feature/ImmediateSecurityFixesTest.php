@@ -5,7 +5,9 @@ namespace Tests\Feature;
 use App\Models\Assignment;
 use App\Models\AssignmentEvaluation;
 use App\Models\AssignmentSubmission;
+use App\Models\ActivityLog;
 use App\Models\Certificate;
+use App\Models\CertificateSetting;
 use App\Models\Course;
 use App\Models\CourseEnrollment;
 use App\Models\CourseSection;
@@ -25,8 +27,11 @@ use App\Models\StudentProfile;
 use App\Models\TeacherProfile;
 use App\Models\User;
 use App\Services\CourseEnrollmentService;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
@@ -301,6 +306,10 @@ class ImmediateSecurityFixesTest extends TestCase
             $this->getJson('/api/certificates/' . $secondCertificate->id),
             'student reading another certificate'
         );
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/certificates/' . $secondCertificate->id . '/download'),
+            'student downloading another certificate'
+        );
 
         $this->authenticate($parentUser);
         $this->getJson('/api/certificates')
@@ -323,6 +332,10 @@ class ImmediateSecurityFixesTest extends TestCase
             $this->getJson('/api/certificates/' . $secondCertificate->id),
             'teacher reading another course certificate'
         );
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/certificates/' . $secondCertificate->id . '/download'),
+            'teacher downloading another course certificate'
+        );
 
         $this->authenticate($adminUser);
         $this->getJson('/api/certificates')
@@ -333,6 +346,362 @@ class ImmediateSecurityFixesTest extends TestCase
             $this->getJson('/api/certificates/' . $secondCertificate->id),
             'institution admin reading another institution certificate'
         );
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/certificates/' . $secondCertificate->id . '/download'),
+            'institution admin downloading another institution certificate'
+        );
+    }
+
+    public function test_parent_certificate_responses_hide_gradebooks_that_do_not_match_the_certificate_pair(): void
+    {
+        $institution = $this->createInstitution('CERT-GRADEBOOK-PAIR');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [, $student] = $this->createStudent($institution);
+        [, $otherStudent] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'certificate-gradebook-course');
+        $otherStudentCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'certificate-gradebook-other-student-course'
+        );
+        $otherCourse = $this->createCourse($institution, $teacher, 'certificate-gradebook-other-course');
+        $missingGradebookCourse = $this->createCourse(
+            $institution,
+            $teacher,
+            'certificate-gradebook-missing-course'
+        );
+
+        foreach ([$course, $otherStudentCourse, $otherCourse, $missingGradebookCourse] as $certificateCourse) {
+            $this->createEnrollment($certificateCourse, $student);
+        }
+        $this->createEnrollment($otherStudentCourse, $otherStudent);
+
+        $validGradebook = $this->createPassingGradebook($course, $student);
+        $otherStudentsGradebook = Gradebook::create([
+            'course_id' => $otherStudentCourse->id,
+            'student_profile_id' => $otherStudent->id,
+            'assignment_marks' => 7654.32,
+            'quiz_marks' => 8765.43,
+            'total_marks' => 9876.54,
+            'maximum_marks' => 10000,
+            'percentage' => 98.76,
+            'grade' => 'A+',
+            'result_status' => 'passed',
+        ]);
+        $validCertificate = $this->createCertificate(
+            $course,
+            $student,
+            'CERT-GRADEBOOK-VALID'
+        );
+        $validCertificate->update(['gradebook_id' => $validGradebook->id]);
+
+        // Create a legacy inconsistent relationship directly to exercise response-time protection.
+        $otherStudentsCertificate = $this->createCertificate(
+            $otherStudentCourse,
+            $student,
+            'CERT-GRADEBOOK-OTHER-STUDENT'
+        );
+        $otherStudentsCertificate->update(['gradebook_id' => $otherStudentsGradebook->id]);
+
+        $otherCoursesCertificate = $this->createCertificate(
+            $otherCourse,
+            $student,
+            'CERT-GRADEBOOK-OTHER-COURSE'
+        );
+        $otherCoursesCertificate->update(['gradebook_id' => $validGradebook->id]);
+
+        $missingGradebookCertificate = $this->createCertificate(
+            $missingGradebookCourse,
+            $student,
+            'CERT-GRADEBOOK-MISSING'
+        );
+        $parent = $this->createParent($institution, $student);
+
+        $this->authenticate($parent);
+
+        $dashboardResponse = $this->getJson('/api/parent-dashboard/' . $student->id)
+            ->assertOk();
+        $dashboardCertificates = collect($dashboardResponse->json('data.certificates'))->keyBy('id');
+        $this->assertSame(
+            $validGradebook->id,
+            $dashboardCertificates[$validCertificate->id]['gradebook']['id']
+        );
+        $this->assertNull($dashboardCertificates[$otherStudentsCertificate->id]['gradebook']);
+        $this->assertNull($dashboardCertificates[$otherCoursesCertificate->id]['gradebook']);
+        $this->assertNull($dashboardCertificates[$missingGradebookCertificate->id]['gradebook']);
+
+        $listingResponse = $this->getJson('/api/certificates')->assertOk();
+        $listedCertificates = collect($listingResponse->json('data.data'))->keyBy('id');
+        $this->assertSame(
+            $validGradebook->id,
+            $listedCertificates[$validCertificate->id]['gradebook']['id']
+        );
+        $this->assertNull($listedCertificates[$otherStudentsCertificate->id]['gradebook']);
+        $this->assertNull($listedCertificates[$otherCoursesCertificate->id]['gradebook']);
+        $this->assertNull($listedCertificates[$missingGradebookCertificate->id]['gradebook']);
+
+        $this->getJson('/api/certificates/' . $validCertificate->id)
+            ->assertOk()
+            ->assertJsonPath('data.gradebook.id', $validGradebook->id);
+        $this->getJson('/api/certificates/' . $otherStudentsCertificate->id)
+            ->assertOk()
+            ->assertJsonPath('data.gradebook', null)
+            ->assertJsonMissing(['total_marks' => '9876.54'])
+            ->assertJsonMissing(['quiz_marks' => '8765.43']);
+        $this->getJson('/api/certificates/' . $otherCoursesCertificate->id)
+            ->assertOk()
+            ->assertJsonPath('data.gradebook', null);
+        $this->getJson('/api/certificates/' . $missingGradebookCertificate->id)
+            ->assertOk()
+            ->assertJsonPath('data.gradebook', null);
+
+        foreach ([$dashboardResponse->json(), $listingResponse->json()] as $parentPayload) {
+            $serializedPayload = json_encode($parentPayload);
+            $this->assertIsString($serializedPayload);
+            $this->assertStringNotContainsString('9876.54', $serializedPayload);
+            $this->assertStringNotContainsString('8765.43', $serializedPayload);
+        }
+
+        $this->authenticate($teacherUser);
+        $this->getJson('/api/certificates/' . $otherStudentsCertificate->id)
+            ->assertOk()
+            ->assertJsonPath('data.gradebook.id', $otherStudentsGradebook->id)
+            ->assertJsonPath('data.gradebook.total_marks', '9876.54');
+
+        foreach ([
+            $this->createInstitutionAdmin($institution),
+            $this->createUserWithRole('super-admin'),
+        ] as $staffAdmin) {
+            $this->authenticate($staffAdmin);
+            $this->getJson('/api/certificates/' . $otherStudentsCertificate->id)
+                ->assertOk()
+                ->assertJsonPath('data.gradebook.id', $otherStudentsGradebook->id);
+        }
+    }
+
+    public function test_institution_admin_certificate_access_uses_all_active_memberships(): void
+    {
+        $firstInstitution = $this->createInstitution('CERT-ADMIN-MULTI-A');
+        $secondInstitution = $this->createInstitution('CERT-ADMIN-MULTI-B');
+        $inactiveInstitution = $this->createInstitution('CERT-ADMIN-MULTI-INACTIVE');
+        $unrelatedInstitution = $this->createInstitution('CERT-ADMIN-MULTI-OTHER');
+
+        [, $firstTeacher] = $this->createTeacher($firstInstitution);
+        [, $secondTeacher] = $this->createTeacher($secondInstitution);
+        [, $inactiveTeacher] = $this->createTeacher($inactiveInstitution);
+        [, $unrelatedTeacher] = $this->createTeacher($unrelatedInstitution);
+        [, $firstStudent] = $this->createStudent($firstInstitution);
+        [, $secondStudent] = $this->createStudent($secondInstitution);
+        [, $inactiveStudent] = $this->createStudent($inactiveInstitution);
+        [, $unrelatedStudent] = $this->createStudent($unrelatedInstitution);
+
+        $firstCourse = $this->createCourse($firstInstitution, $firstTeacher, 'certificate-admin-multi-a');
+        $secondCourse = $this->createCourse($secondInstitution, $secondTeacher, 'certificate-admin-multi-b');
+        $inactiveCourse = $this->createCourse(
+            $inactiveInstitution,
+            $inactiveTeacher,
+            'certificate-admin-multi-inactive'
+        );
+        $unrelatedCourse = $this->createCourse(
+            $unrelatedInstitution,
+            $unrelatedTeacher,
+            'certificate-admin-multi-other'
+        );
+
+        $firstCertificate = $this->createCertificate($firstCourse, $firstStudent, 'CERT-ADMIN-MULTI-A');
+        $secondCertificate = $this->createCertificate($secondCourse, $secondStudent, 'CERT-ADMIN-MULTI-B');
+        $inactiveCertificate = $this->createCertificate(
+            $inactiveCourse,
+            $inactiveStudent,
+            'CERT-ADMIN-MULTI-INACTIVE'
+        );
+        $unrelatedCertificate = $this->createCertificate(
+            $unrelatedCourse,
+            $unrelatedStudent,
+            'CERT-ADMIN-MULTI-OTHER'
+        );
+        $inconsistentCertificate = $this->createCertificate(
+            $secondCourse,
+            $inactiveStudent,
+            'CERT-ADMIN-MULTI-INCONSISTENT'
+        );
+
+        foreach ([
+            [$firstCertificate, 'admin-a.pdf'],
+            [$secondCertificate, 'admin-b.pdf'],
+            [$inactiveCertificate, 'admin-inactive.pdf'],
+            [$unrelatedCertificate, 'admin-other.pdf'],
+        ] as [$certificate, $path]) {
+            $certificate->update(['certificate_file' => $path]);
+        }
+
+        $admin = $this->createInstitutionAdmin($firstInstitution);
+        InstitutionUser::create([
+            'institution_id' => $secondInstitution->id,
+            'user_id' => $admin->id,
+            'role_in_institution' => 'admin',
+            'status' => 'active',
+        ]);
+        InstitutionUser::create([
+            'institution_id' => $inactiveInstitution->id,
+            'user_id' => $admin->id,
+            'role_in_institution' => 'admin',
+            'status' => 'inactive',
+        ]);
+
+        Storage::fake('certificates');
+        foreach (['admin-a.pdf', 'admin-b.pdf', 'admin-inactive.pdf', 'admin-other.pdf'] as $path) {
+            Storage::disk('certificates')->put($path, '%PDF-1.4 admin certificate fixture');
+        }
+
+        $this->authenticate($admin);
+
+        $listing = $this->getJson('/api/certificates')->assertOk();
+        $listedIds = collect($listing->json('data.data'))->pluck('id')->all();
+        $this->assertEqualsCanonicalizing(
+            [$firstCertificate->id, $secondCertificate->id],
+            $listedIds
+        );
+
+        $this->getJson('/api/certificates/' . $firstCertificate->id)->assertOk();
+        $this->getJson('/api/certificates/' . $secondCertificate->id)->assertOk();
+        foreach ([$inactiveCertificate, $unrelatedCertificate, $inconsistentCertificate] as $certificate) {
+            $this->assertForbiddenResponse(
+                $this->getJson('/api/certificates/' . $certificate->id),
+                'institution admin reading a certificate outside an active, consistent institution'
+            );
+        }
+
+        $this->get('/api/certificates/' . $secondCertificate->id . '/download')
+            ->assertDownload('admin-b.pdf');
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/certificates/' . $inactiveCertificate->id . '/download'),
+            'institution admin downloading a certificate through an inactive membership'
+        );
+
+        $this->patchJson('/api/certificates/' . $secondCertificate->id, [
+            'remarks' => 'Updated by a multi-institution administrator.',
+        ])->assertOk();
+        $this->assertForbiddenResponse(
+            $this->patchJson('/api/certificates/' . $inactiveCertificate->id, [
+                'remarks' => 'Should not be changed.',
+            ]),
+            'institution admin updating a certificate through an inactive membership'
+        );
+
+        $pdf = \Mockery::mock(\Barryvdh\DomPDF\PDF::class);
+        $pdf->shouldReceive('setPaper')->once()->with('a4', 'landscape')->andReturnSelf();
+        $pdf->shouldReceive('output')->once()->andReturn('%PDF-1.4 regenerated certificate');
+        Pdf::shouldReceive('loadView')->once()->andReturn($pdf);
+
+        $this->postJson('/api/certificates/' . $secondCertificate->id . '/generate')
+            ->assertOk();
+        $this->assertForbiddenResponse(
+            $this->postJson('/api/certificates/' . $inactiveCertificate->id . '/generate'),
+            'institution admin generating a certificate through an inactive membership'
+        );
+
+        $this->deleteJson('/api/certificates/' . $secondCertificate->id)->assertOk();
+        $this->assertForbiddenResponse(
+            $this->deleteJson('/api/certificates/' . $inactiveCertificate->id),
+            'institution admin deleting a certificate through an inactive membership'
+        );
+    }
+
+    public function test_institution_admin_can_issue_for_a_second_active_membership_but_not_an_inactive_one(): void
+    {
+        $firstInstitution = $this->createInstitution('CERT-ADMIN-ISSUE-A');
+        $authorizedInstitution = $this->createInstitution('CERT-ADMIN-ISSUE-B');
+        $inactiveInstitution = $this->createInstitution('CERT-ADMIN-ISSUE-INACTIVE');
+        [, $authorizedTeacher] = $this->createTeacher($authorizedInstitution);
+        [, $inactiveTeacher] = $this->createTeacher($inactiveInstitution);
+        [, $authorizedStudent] = $this->createStudent($authorizedInstitution);
+        [, $inactiveStudent] = $this->createStudent($inactiveInstitution);
+        $authorizedCourse = $this->createCourse(
+            $authorizedInstitution,
+            $authorizedTeacher,
+            'certificate-admin-issue-authorized'
+        );
+        $inactiveCourse = $this->createCourse(
+            $inactiveInstitution,
+            $inactiveTeacher,
+            'certificate-admin-issue-inactive'
+        );
+        $this->createEnrollment($authorizedCourse, $authorizedStudent);
+        $this->createEnrollment($inactiveCourse, $inactiveStudent);
+        $gradebook = $this->createPassingGradebook($authorizedCourse, $authorizedStudent);
+
+        $admin = $this->createInstitutionAdmin($firstInstitution);
+        InstitutionUser::create([
+            'institution_id' => $authorizedInstitution->id,
+            'user_id' => $admin->id,
+            'role_in_institution' => 'admin',
+            'status' => 'active',
+        ]);
+        InstitutionUser::create([
+            'institution_id' => $inactiveInstitution->id,
+            'user_id' => $admin->id,
+            'role_in_institution' => 'admin',
+            'status' => 'inactive',
+        ]);
+
+        $this->mock(\App\Services\GradebookCalculationService::class)
+            ->shouldReceive('recalculate')
+            ->once()
+            ->with((int) $authorizedCourse->id, (int) $authorizedStudent->id)
+            ->andReturn($gradebook);
+
+        Storage::fake('certificates');
+        $pdf = \Mockery::mock(\Barryvdh\DomPDF\PDF::class);
+        $pdf->shouldReceive('setPaper')->once()->with('a4', 'landscape')->andReturnSelf();
+        $pdf->shouldReceive('output')->once()->andReturn('%PDF-1.4 issued certificate');
+        Pdf::shouldReceive('loadView')->once()->andReturn($pdf);
+
+        $this->authenticate($admin);
+
+        $this->postJson('/api/certificates', [
+            'course_id' => $inactiveCourse->id,
+            'student_profile_id' => $inactiveStudent->id,
+        ])->assertForbidden();
+
+        $this->postJson('/api/certificates', [
+            'course_id' => $authorizedCourse->id,
+            'student_profile_id' => $authorizedStudent->id,
+        ])->assertCreated();
+
+        $this->assertDatabaseHas('certificates', [
+            'course_id' => $authorizedCourse->id,
+            'student_profile_id' => $authorizedStudent->id,
+            'status' => 'issued',
+        ]);
+        $this->assertDatabaseMissing('certificates', [
+            'course_id' => $inactiveCourse->id,
+            'student_profile_id' => $inactiveStudent->id,
+        ]);
+    }
+
+    public function test_super_admin_certificate_access_does_not_require_institution_membership(): void
+    {
+        $institution = $this->createInstitution('CERT-SUPER-ADMIN-ACCESS');
+        [, $teacher] = $this->createTeacher($institution);
+        [, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'certificate-super-admin-access');
+        $certificate = $this->createCertificate($course, $student, 'CERT-SUPER-ADMIN-ACCESS-001');
+        $certificate->update(['certificate_file' => 'super-admin-certificate.pdf']);
+        $superAdmin = $this->createUserWithRole('super-admin');
+
+        Storage::fake('certificates');
+        Storage::disk('certificates')->put('super-admin-certificate.pdf', '%PDF-1.4 super admin fixture');
+
+        $this->authenticate($superAdmin);
+
+        $this->getJson('/api/certificates')
+            ->assertOk()
+            ->assertJsonCount(1, 'data.data')
+            ->assertJsonPath('data.data.0.id', $certificate->id);
+        $this->getJson('/api/certificates/' . $certificate->id)->assertOk();
+        $this->get('/api/certificates/' . $certificate->id . '/download')
+            ->assertDownload('super-admin-certificate.pdf');
     }
 
     public function test_parent_certificate_access_supports_multiple_children(): void
@@ -431,9 +800,1764 @@ class ImmediateSecurityFixesTest extends TestCase
         );
 
         $this->assertForbiddenResponse(
+            $this->getJson('/api/certificates/' . $unrelatedCertificate->id . '/download'),
+            'parent downloading unrelated child certificate'
+        );
+
+        $this->assertForbiddenResponse(
             $this->getJson('/api/certificates/' . $inactiveCertificate->id),
             'parent reading inactive linked child certificate'
         );
+    }
+
+    public function test_same_institution_parent_profile_creation_and_certificate_download_are_allowed(): void
+    {
+        $institution = $this->createInstitution('PARENT-PROFILE-VALID');
+        $admin = $this->createInstitutionAdmin($institution);
+        $parentUser = $this->createUserWithRole('parent');
+        [, $student] = $this->createStudent($institution);
+        [, $teacher] = $this->createTeacher($institution);
+
+        $this->authenticate($admin);
+        $this->postJson('/api/parent-profiles', [
+            'institution_id' => $institution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $student->id,
+            'status' => 'active',
+        ])->assertCreated()
+            ->assertJsonPath('data.institution_id', $institution->id)
+            ->assertJsonPath('data.user_id', $parentUser->id)
+            ->assertJsonPath('data.student_profile_id', $student->id);
+
+        $course = $this->createCourse($institution, $teacher, 'parent-profile-valid-download');
+        $this->createEnrollment($course, $student);
+        $certificate = $this->createCertificate($course, $student, 'PARENT-PROFILE-VALID-001');
+        $certificate->update(['certificate_file' => 'parent-profile-valid.pdf']);
+        Storage::fake('certificates');
+        Storage::disk('certificates')->put('parent-profile-valid.pdf', '%PDF-1.4 same institution');
+
+        $this->authenticate($parentUser);
+        $response = $this->get('/api/certificates/' . $certificate->id . '/download')
+            ->assertDownload('parent-profile-valid.pdf');
+
+        $this->assertSame('%PDF-1.4 same institution', $response->streamedContent());
+    }
+
+    public function test_parent_profile_creation_rejects_cross_institution_parent_child_link(): void
+    {
+        $firstInstitution = $this->createInstitution('PARENT-PROFILE-CREATE-A');
+        $secondInstitution = $this->createInstitution('PARENT-PROFILE-CREATE-B');
+        $admin = $this->createInstitutionAdmin($firstInstitution);
+        $parentUser = $this->createUserWithRole('parent');
+        [, $student] = $this->createStudent($secondInstitution);
+
+        $this->authenticate($admin);
+        $this->postJson('/api/parent-profiles', [
+            'institution_id' => $firstInstitution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $student->id,
+            'status' => 'active',
+        ])->assertUnprocessable();
+
+        $this->assertDatabaseMissing('parent_profiles', [
+            'institution_id' => $firstInstitution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $student->id,
+        ]);
+    }
+
+    public function test_parent_profile_creation_requires_a_user_with_the_parent_role(): void
+    {
+        $institution = $this->createInstitution('PARENT-PROFILE-ROLE');
+        $admin = $this->createInstitutionAdmin($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+
+        $this->authenticate($admin);
+        $this->postJson('/api/parent-profiles', [
+            'institution_id' => $institution->id,
+            'user_id' => $studentUser->id,
+            'student_profile_id' => $student->id,
+            'status' => 'active',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('user_id');
+    }
+
+    public function test_parent_profile_update_rejects_cross_institution_link_when_only_student_changes(): void
+    {
+        $firstInstitution = $this->createInstitution('PARENT-PROFILE-UPDATE-A');
+        $secondInstitution = $this->createInstitution('PARENT-PROFILE-UPDATE-B');
+        $admin = $this->createInstitutionAdmin($firstInstitution);
+        [, $firstStudent] = $this->createStudent($firstInstitution);
+        [, $secondStudent] = $this->createStudent($secondInstitution);
+        $parentUser = $this->createUserWithRole('parent');
+        $parentProfile = ParentProfile::create([
+            'institution_id' => $firstInstitution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $firstStudent->id,
+            'status' => 'active',
+        ]);
+
+        $this->authenticate($admin);
+        $this->patchJson('/api/parent-profiles/' . $parentProfile->id, [
+            'student_profile_id' => $secondStudent->id,
+        ])->assertUnprocessable();
+
+        $this->patchJson('/api/parent-profiles/' . $parentProfile->id, [
+            'institution_id' => $secondInstitution->id,
+        ])->assertUnprocessable();
+
+        $this->assertSame(
+            $firstStudent->id,
+            $parentProfile->fresh()->student_profile_id
+        );
+        $this->assertSame(
+            $firstInstitution->id,
+            $parentProfile->fresh()->institution_id
+        );
+    }
+
+    public function test_parent_certificate_download_denies_inconsistent_profile_or_course_institution(): void
+    {
+        $firstInstitution = $this->createInstitution('PARENT-CERT-CONSISTENCY-A');
+        $secondInstitution = $this->createInstitution('PARENT-CERT-CONSISTENCY-B');
+        [, $teacher] = $this->createTeacher($firstInstitution);
+        [, $firstStudent] = $this->createStudent($firstInstitution);
+        [, $secondStudent] = $this->createStudent($secondInstitution);
+        $course = $this->createCourse($firstInstitution, $teacher, 'parent-cert-consistency');
+        $firstCertificate = $this->createCertificate(
+            $course,
+            $firstStudent,
+            'PARENT-CERT-CONSISTENCY-001'
+        );
+        $secondCertificate = $this->createCertificate(
+            $course,
+            $secondStudent,
+            'PARENT-CERT-CONSISTENCY-002'
+        );
+        $parentUser = $this->createUserWithRole('parent');
+
+        ParentProfile::create([
+            'institution_id' => $secondInstitution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $firstStudent->id,
+            'status' => 'active',
+        ]);
+        ParentProfile::create([
+            'institution_id' => $secondInstitution->id,
+            'user_id' => $parentUser->id,
+            'student_profile_id' => $secondStudent->id,
+            'status' => 'active',
+        ]);
+
+        $this->authenticate($parentUser);
+        $this->assertForbiddenResponse(
+            $this->get('/api/certificates/' . $firstCertificate->id . '/download'),
+            'parent profile institution differs from certificate student institution'
+        );
+        $this->assertForbiddenResponse(
+            $this->get('/api/certificates/' . $secondCertificate->id . '/download'),
+            'certificate course institution differs from certificate student institution'
+        );
+
+        $this->getJson('/api/certificates')
+            ->assertOk()
+            ->assertJsonMissing(['id' => $firstCertificate->id])
+            ->assertJsonMissing(['id' => $secondCertificate->id]);
+    }
+
+    public function test_institution_admin_cannot_manage_parent_profiles_outside_authorized_institution(): void
+    {
+        $firstInstitution = $this->createInstitution('PARENT-PROFILE-ADMIN-A');
+        $secondInstitution = $this->createInstitution('PARENT-PROFILE-ADMIN-B');
+        $admin = $this->createInstitutionAdmin($firstInstitution);
+        [, $firstStudent] = $this->createStudent($firstInstitution);
+        [, $secondStudent] = $this->createStudent($secondInstitution);
+        $firstParent = $this->createUserWithRole('parent');
+        $secondParent = $this->createUserWithRole('parent');
+        $firstProfile = ParentProfile::create([
+            'institution_id' => $firstInstitution->id,
+            'user_id' => $firstParent->id,
+            'student_profile_id' => $firstStudent->id,
+            'status' => 'active',
+        ]);
+        $secondProfile = ParentProfile::create([
+            'institution_id' => $secondInstitution->id,
+            'user_id' => $secondParent->id,
+            'student_profile_id' => $secondStudent->id,
+            'status' => 'active',
+        ]);
+
+        $this->authenticate($admin);
+        $this->getJson('/api/parent-profiles')
+            ->assertOk()
+            ->assertJsonCount(1, 'data.data')
+            ->assertJsonPath('data.data.0.id', $firstProfile->id);
+
+        $this->assertForbiddenResponse(
+            $this->getJson('/api/parent-profiles/' . $secondProfile->id),
+            'institution admin reading another institution parent profile'
+        );
+        $this->assertForbiddenResponse(
+            $this->patchJson('/api/parent-profiles/' . $secondProfile->id, ['status' => 'inactive']),
+            'institution admin updating another institution parent profile'
+        );
+        $this->assertForbiddenResponse(
+            $this->deleteJson('/api/parent-profiles/' . $secondProfile->id),
+            'institution admin deleting another institution parent profile'
+        );
+        $this->assertForbiddenResponse(
+            $this->postJson('/api/parent-profiles', [
+                'institution_id' => $secondInstitution->id,
+                'user_id' => $this->createUserWithRole('parent')->id,
+                'student_profile_id' => $secondStudent->id,
+                'status' => 'active',
+            ]),
+            'institution admin creating a parent profile for another institution'
+        );
+
+        $this->assertDatabaseHas('parent_profiles', ['id' => $secondProfile->id]);
+    }
+
+    public function test_pending_manual_grading_blocks_certificate_issue_generation_and_download_without_mutating_existing_record(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-PENDING-ISSUE', false);
+        $attempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $fixture['student']->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinutes(10),
+            'submitted_at' => now()->subMinutes(5),
+            'evaluated_at' => now()->subMinutes(4),
+            'total_marks' => 16,
+            'marks_obtained' => 12,
+            'percentage' => 75,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+        QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $fixture['manual_questions']['short_answer']->id,
+            'answer_text' => 'Legacy answer without a grading marker.',
+            'is_correct' => true,
+            'marks_obtained' => 5,
+            'manually_graded_at' => null,
+        ]);
+        $gradebook = Gradebook::create([
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+            'assignment_marks' => 80,
+            'quiz_marks' => 75,
+            'total_marks' => 155,
+            'maximum_marks' => 200,
+            'percentage' => 77.5,
+            'grade' => 'B',
+            'result_status' => 'passed',
+        ]);
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        $this->authenticate($fixture['teacher_user']);
+
+        $this->postJson('/api/certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertUnprocessable()
+            ->assertJsonPath('grading_pending', true);
+
+        $this->assertDatabaseMissing('certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ]);
+
+        $certificate = $this->createCertificate(
+            $fixture['quiz']->course,
+            $fixture['student'],
+            'CERT-PENDING-ISSUE-001'
+        );
+        $certificate->update([
+            'gradebook_id' => $gradebook->id,
+            'certificate_file' => 'certificates/stale-certificate.pdf',
+            'status' => 'pending',
+            'verification_status' => 'revoked',
+        ]);
+        Storage::disk('public')->put(
+            $certificate->certificate_file,
+            'stale certificate contents'
+        );
+        $originalCertificate = $certificate->fresh()->getAttributes();
+
+        $this->patchJson('/api/certificates/' . $certificate->id, [
+            'status' => 'issued',
+            'verification_status' => 'valid',
+        ])->assertUnprocessable()
+            ->assertJsonPath('grading_pending', true);
+        $this->postJson('/api/certificates/' . $certificate->id . '/generate')
+            ->assertUnprocessable()
+            ->assertJsonPath('grading_pending', true);
+
+        $this->authenticate($fixture['student_user']);
+        $this->getJson('/api/certificates/' . $certificate->id . '/download')
+            ->assertUnprocessable()
+            ->assertJsonPath('grading_pending', true);
+
+        Storage::disk('public')->assertExists('certificates/stale-certificate.pdf');
+        Storage::disk('certificates')->assertMissing('certificates/stale-certificate.pdf');
+        $this->assertSame(
+            'stale certificate contents',
+            Storage::disk('public')->get('certificates/stale-certificate.pdf')
+        );
+        $this->assertSame($originalCertificate, $certificate->fresh()->getAttributes());
+
+        $certificate->update(['certificate_file' => null]);
+        $this->getJson('/api/certificates/' . $certificate->id . '/download')
+            ->assertUnprocessable()
+            ->assertJsonPath('grading_pending', true);
+        $this->assertNull($certificate->fresh()->certificate_file);
+    }
+
+    public function test_certificate_issuance_recalculates_stale_passing_gradebook_after_manual_mark_is_finalized(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-FRESH-GRADEBOOK-FAIL', false);
+        $gradebook = $this->createPassingGradebook($fixture['quiz']->course, $fixture['student']);
+        $certificate = $this->createCertificate(
+            $fixture['quiz']->course,
+            $fixture['student'],
+            'CERT-FRESH-GRADEBOOK-FAIL-001'
+        );
+        $certificate->update([
+            'gradebook_id' => $gradebook->id,
+            'final_percentage' => 88.25,
+            'final_grade' => 'A',
+            'certificate_file' => 'existing-issued-certificate.pdf',
+        ]);
+        $originalSnapshot = $this->certificateSnapshot($certificate);
+
+        $attempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $fixture['student']->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinutes(10),
+            'submitted_at' => now()->subMinutes(5),
+            'total_marks' => 16,
+            'marks_obtained' => 6,
+            'percentage' => 37.5,
+            'result_status' => 'pending',
+            'status' => 'submitted',
+        ]);
+        $manualAnswer = QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $fixture['manual_questions']['short_answer']->id,
+            'answer_text' => 'Answer awaiting final marks.',
+            'is_correct' => true,
+            'marks_obtained' => 5,
+            'manually_graded_at' => null,
+        ]);
+        QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $fixture['automatic_question']->id,
+            'question_option_id' => $fixture['correct_option']->id,
+            'is_correct' => true,
+            'marks_obtained' => 1,
+        ]);
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        Storage::disk('certificates')->put(
+            'existing-issued-certificate.pdf',
+            '%PDF-1.4 existing issued snapshot'
+        );
+        $this->createCertificateSetting(
+            Institution::findOrFail($fixture['student']->institution_id)
+        );
+        Pdf::shouldReceive('loadView')->never();
+
+        $this->authenticate($fixture['teacher_user']);
+        $this->patchJson('/api/quiz-answers/' . $manualAnswer->id, [
+            'marks_obtained' => 0,
+        ])->assertOk();
+
+        $this->assertSame('evaluated', $attempt->fresh()->status);
+        $this->assertSame('failed', $attempt->fresh()->result_status);
+        $this->assertNotNull($manualAnswer->fresh()->manually_graded_at);
+        $this->assertSame('passed', $gradebook->fresh()->result_status);
+
+        $this->postJson('/api/certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertUnprocessable()
+            ->assertJsonPath(
+                'message',
+                'Certificate cannot be issued because student has not passed.'
+            );
+
+        $this->assertSame('6.25', $gradebook->fresh()->percentage);
+        $this->assertSame('failed', $gradebook->fresh()->result_status);
+        $this->assertSame($originalSnapshot, $this->certificateSnapshot($certificate->fresh()));
+        Storage::disk('certificates')->assertExists('existing-issued-certificate.pdf');
+        $this->assertSame(
+            ['existing-issued-certificate.pdf'],
+            Storage::disk('certificates')->allFiles()
+        );
+    }
+
+    public function test_certificate_issuance_can_use_a_fresh_passing_gradebook_after_manual_grading(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-FRESH-GRADEBOOK-PASS', false);
+        $gradebook = Gradebook::create([
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+            'assignment_marks' => 0,
+            'quiz_marks' => 0,
+            'total_marks' => 0,
+            'maximum_marks' => 16,
+            'percentage' => 0,
+            'grade' => 'F',
+            'result_status' => 'failed',
+        ]);
+        $attempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $fixture['student']->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinutes(10),
+            'submitted_at' => now()->subMinutes(5),
+            'total_marks' => 16,
+            'marks_obtained' => 0,
+            'percentage' => 0,
+            'result_status' => 'pending',
+            'status' => 'submitted',
+        ]);
+        $firstManualAnswer = QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $fixture['manual_questions']['short_answer']->id,
+            'answer_text' => 'First answer.',
+            'is_correct' => false,
+            'marks_obtained' => 0,
+            'manually_graded_at' => null,
+        ]);
+        $secondManualAnswer = QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $fixture['manual_questions']['long_answer']->id,
+            'answer_text' => 'Second answer.',
+            'is_correct' => false,
+            'marks_obtained' => 0,
+            'manually_graded_at' => null,
+        ]);
+        $this->createCertificateSetting(
+            Institution::findOrFail($fixture['student']->institution_id)
+        );
+        Storage::fake('certificates');
+        Storage::fake('public');
+
+        $pdf = \Mockery::mock(\Barryvdh\DomPDF\PDF::class);
+        $pdf->shouldReceive('setPaper')->once()->with('a4', 'landscape')->andReturnSelf();
+        $pdf->shouldReceive('output')->once()->andReturn('%PDF-1.4 fresh passing certificate');
+        Pdf::shouldReceive('loadView')->once()->andReturn($pdf);
+
+        $this->authenticate($fixture['teacher_user']);
+        $this->patchJson('/api/quiz-answers/' . $firstManualAnswer->id, [
+            'marks_obtained' => 5,
+        ])->assertOk();
+        $this->patchJson('/api/quiz-answers/' . $secondManualAnswer->id, [
+            'marks_obtained' => 5,
+        ])->assertOk();
+
+        $this->assertSame('evaluated', $attempt->fresh()->status);
+        $this->assertSame('passed', $attempt->fresh()->result_status);
+        $this->assertSame('failed', $gradebook->fresh()->result_status);
+
+        $response = $this->postJson('/api/certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertCreated();
+
+        $certificate = Certificate::where('course_id', $fixture['quiz']->course_id)
+            ->where('student_profile_id', $fixture['student']->id)
+            ->firstOrFail();
+        $this->assertSame('passed', $gradebook->fresh()->result_status);
+        $this->assertSame('62.50', $gradebook->fresh()->percentage);
+        $this->assertSame('62.50', $certificate->final_percentage);
+        $this->assertSame('B', $certificate->final_grade);
+        $this->assertSame($certificate->id, $response->json('data.id'));
+        Storage::disk('certificates')->assertExists($certificate->certificate_file);
+    }
+
+    public function test_gradebook_refresh_does_not_rewrite_an_existing_certificate_snapshot(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-SNAPSHOT-GRADEBOOK-REFRESH', false);
+        $gradebook = $this->createPassingGradebook($fixture['quiz']->course, $fixture['student']);
+        $attempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $fixture['student']->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinutes(10),
+            'submitted_at' => now()->subMinutes(5),
+            'evaluated_at' => now()->subMinutes(4),
+            'total_marks' => 16,
+            'marks_obtained' => 8,
+            'percentage' => 50,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+        $certificate = $this->createCertificate(
+            $fixture['quiz']->course,
+            $fixture['student'],
+            'CERT-SNAPSHOT-GRADEBOOK-REFRESH-001'
+        );
+        $certificate->update([
+            'gradebook_id' => $gradebook->id,
+            'final_percentage' => 91.75,
+            'final_grade' => 'A+',
+        ]);
+        $originalSnapshot = $this->certificateSnapshot($certificate);
+
+        $this->authenticate($fixture['teacher_user']);
+        $this->postJson('/api/gradebooks/recalculate', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertOk()
+            ->assertJsonPath('data.quiz_marks', '8.00')
+            ->assertJsonPath('data.percentage', '50.00');
+
+        $this->assertSame('evaluated', $attempt->fresh()->status);
+        $this->assertSame($originalSnapshot, $this->certificateSnapshot($certificate->fresh()));
+    }
+
+    public function test_certificate_reconciliation_reports_matching_snapshot_for_multi_institution_admin(): void
+    {
+        $fixture = $this->createCertificateReconciliationFixture('RECONCILE-MATCH');
+        $authorizedInstitution = Institution::findOrFail($fixture['quiz']->course->institution_id);
+        $firstInstitution = $this->createInstitution('RECONCILE-MULTI-ADMIN-A');
+        $inactiveInstitution = $this->createInstitution('RECONCILE-MULTI-ADMIN-INACTIVE');
+        $admin = $this->createInstitutionAdmin($firstInstitution);
+        InstitutionUser::create([
+            'institution_id' => $authorizedInstitution->id,
+            'user_id' => $admin->id,
+            'role_in_institution' => 'admin',
+            'status' => 'active',
+        ]);
+        InstitutionUser::create([
+            'institution_id' => $inactiveInstitution->id,
+            'user_id' => $admin->id,
+            'role_in_institution' => 'admin',
+            'status' => 'inactive',
+        ]);
+
+        [, $inactiveTeacher] = $this->createTeacher($inactiveInstitution);
+        [, $inactiveStudent] = $this->createStudent($inactiveInstitution);
+        $inactiveCourse = $this->createCourse(
+            $inactiveInstitution,
+            $inactiveTeacher,
+            'certificate-reconciliation-inactive-membership'
+        );
+        $inactiveCertificate = $this->createCertificate(
+            $inactiveCourse,
+            $inactiveStudent,
+            'CERT-RECONCILE-INACTIVE-MEMBERSHIP'
+        );
+
+        $this->authenticate($admin);
+
+        $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+            ->assertOk()
+            ->assertJsonPath('data.snapshot_comparison.discrepancy_detected', false)
+            ->assertJsonPath('data.snapshot_comparison.mismatched_fields', [])
+            ->assertJsonPath('data.certificate.currently_valid', true)
+            ->assertJsonPath('data.current_gradebook.currently_pass_eligible', true);
+
+        $auditLog = ActivityLog::where('module', 'Certificate')
+            ->where('action', 'snapshot_reconciled')
+            ->firstOrFail();
+        $this->assertSame($admin->id, $auditLog->user_id);
+        $this->assertSame($authorizedInstitution->id, $auditLog->institution_id);
+        $this->assertSame('Course', class_basename($auditLog->model_type));
+        $this->assertSame($fixture['quiz']->course_id, $auditLog->model_id);
+        $this->assertSame($fixture['certificate']->id, $auditLog->metadata['certificate_id']);
+        $this->assertFalse($auditLog->metadata['snapshot_discrepancy_detected']);
+
+        $visibleAuditLogs = app(\App\Services\AuditLogService::class)
+            ->timeline($admin, [])
+            ->getCollection();
+        $this->assertTrue($visibleAuditLogs->contains('id', $auditLog->id));
+
+        $this->postJson('/api/certificates/' . $inactiveCertificate->id . '/reconcile')
+            ->assertForbidden();
+        $this->assertSame(1, ActivityLog::where('action', 'snapshot_reconciled')->count());
+    }
+
+    public function test_certificate_reconciliation_detects_changed_grade_without_changing_certificate_or_pdf(): void
+    {
+        $fixture = $this->createCertificateReconciliationFixture('RECONCILE-CHANGED');
+        $attempt = $fixture['attempt'];
+        $attempt->update([
+            'marks_obtained' => 6,
+            'percentage' => 37.5,
+            'result_status' => 'failed',
+        ]);
+
+        $privatePdfPath = 'historic-reconciliation-certificate.pdf';
+        $fixture['certificate']->update(['certificate_file' => $privatePdfPath]);
+        $certificateAttributes = $fixture['certificate']->fresh()->getAttributes();
+        $pdfContents = '%PDF-1.4 historical certificate remains unchanged';
+        Storage::fake('certificates');
+        Storage::disk('certificates')->put($privatePdfPath, $pdfContents);
+
+        $this->authenticate($fixture['teacher_user']);
+
+        $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+            ->assertOk()
+            ->assertJsonPath('data.snapshot_comparison.discrepancy_detected', true)
+            ->assertJsonPath('data.snapshot_comparison.mismatched_fields', [
+                'final_percentage',
+                'final_grade',
+            ])
+            ->assertJsonPath('data.certificate.final_percentage', '75.00')
+            ->assertJsonPath('data.certificate.final_grade', 'B+')
+            ->assertJsonPath('data.current_gradebook.percentage', '37.50')
+            ->assertJsonPath('data.current_gradebook.grade', 'F')
+            ->assertJsonPath('data.current_gradebook.result_status', 'failed')
+            ->assertJsonPath('data.current_gradebook.currently_pass_eligible', false);
+
+        $this->assertSame($certificateAttributes, $fixture['certificate']->fresh()->getAttributes());
+        Storage::disk('certificates')->assertExists($privatePdfPath);
+        $this->assertSame($pdfContents, Storage::disk('certificates')->get($privatePdfPath));
+        $this->assertSame('37.50', $fixture['gradebook']->fresh()->percentage);
+        $this->assertSame('failed', $fixture['gradebook']->fresh()->result_status);
+
+        $auditLog = ActivityLog::where('module', 'Certificate')
+            ->where('action', 'snapshot_reconciled')
+            ->firstOrFail();
+        $this->assertSame($fixture['institution_id'], $auditLog->institution_id);
+        $this->assertSame($fixture['teacher_user']->id, $auditLog->user_id);
+        $this->assertSame([
+            'final_percentage',
+            'final_grade',
+        ], $auditLog->metadata['mismatched_fields']);
+        $this->assertArrayNotHasKey('final_grade', $auditLog->metadata);
+        $this->assertArrayNotHasKey('percentage', $auditLog->metadata);
+    }
+
+    public function test_certificate_reconciliation_fails_closed_when_gradebook_refresh_fails(): void
+    {
+        $fixture = $this->createCertificateReconciliationFixture('RECONCILE-FAIL');
+        $fixture['gradebook']->update(['percentage' => 74]);
+        $certificateAttributes = $fixture['certificate']->fresh()->getAttributes();
+        $gradebookAttributes = $fixture['gradebook']->fresh()->getAttributes();
+        DB::statement(
+            "CREATE TRIGGER fail_reconciliation_gradebook_refresh " .
+            "BEFORE UPDATE ON gradebooks " .
+            "BEGIN SELECT RAISE(ABORT, 'simulated reconciliation refresh failure'); END"
+        );
+
+        $this->authenticate($fixture['teacher_user']);
+
+        $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+            ->assertStatus(503)
+            ->assertJsonPath(
+                'message',
+                'Certificate reconciliation could not be completed.'
+            )
+            ->assertJsonMissingPath('data');
+
+        $this->assertSame($certificateAttributes, $fixture['certificate']->fresh()->getAttributes());
+        $this->assertSame($gradebookAttributes, $fixture['gradebook']->fresh()->getAttributes());
+        $this->assertSame(0, ActivityLog::where('action', 'snapshot_reconciled')->count());
+    }
+
+    public function test_certificate_reconciliation_rolls_back_gradebook_refresh_if_audit_write_fails(): void
+    {
+        $fixture = $this->createCertificateReconciliationFixture('RECONCILE-AUDIT-FAIL');
+        $fixture['gradebook']->update(['percentage' => 74]);
+        $certificateAttributes = $fixture['certificate']->fresh()->getAttributes();
+        $gradebookAttributes = $fixture['gradebook']->fresh()->getAttributes();
+        DB::statement(
+            "CREATE TRIGGER fail_reconciliation_audit_insert " .
+            "BEFORE INSERT ON activity_logs " .
+            "BEGIN SELECT RAISE(ABORT, 'simulated reconciliation audit failure'); END"
+        );
+
+        $this->authenticate($fixture['teacher_user']);
+
+        $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+            ->assertStatus(503)
+            ->assertJsonPath(
+                'message',
+                'Certificate reconciliation could not be completed.'
+            )
+            ->assertJsonMissingPath('data');
+
+        $this->assertSame($certificateAttributes, $fixture['certificate']->fresh()->getAttributes());
+        $this->assertSame($gradebookAttributes, $fixture['gradebook']->fresh()->getAttributes());
+        $this->assertSame(0, ActivityLog::where('action', 'snapshot_reconciled')->count());
+    }
+
+    public function test_certificate_reconciliation_is_deferred_for_pending_manual_grading_and_unissued_certificates(): void
+    {
+        $fixture = $this->createCertificateReconciliationFixture('RECONCILE-PENDING');
+        $answer = QuizAnswer::create([
+            'quiz_attempt_id' => $fixture['attempt']->id,
+            'question_bank_id' => $fixture['manual_questions']['long_answer']->id,
+            'answer_text' => 'Waiting for manual grading.',
+            'is_correct' => false,
+            'marks_obtained' => 0,
+            'manually_graded_at' => null,
+        ]);
+        $certificateAttributes = $fixture['certificate']->fresh()->getAttributes();
+        $gradebookAttributes = $fixture['gradebook']->fresh()->getAttributes();
+
+        $this->authenticate($fixture['teacher_user']);
+
+        $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+            ->assertUnprocessable()
+            ->assertJsonPath('grading_pending', true)
+            ->assertJsonMissingPath('data');
+
+        $this->assertSame($certificateAttributes, $fixture['certificate']->fresh()->getAttributes());
+        $this->assertSame($gradebookAttributes, $fixture['gradebook']->fresh()->getAttributes());
+        $this->assertSame(0, ActivityLog::where('action', 'snapshot_reconciled')->count());
+
+        $answer->delete();
+        $fixture['certificate']->update(['status' => 'pending']);
+        $pendingCertificateAttributes = $fixture['certificate']->fresh()->getAttributes();
+
+        $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'Certificate cannot be reconciled.')
+            ->assertJsonMissingPath('data');
+
+        $this->assertSame(
+            $pendingCertificateAttributes,
+            $fixture['certificate']->fresh()->getAttributes()
+        );
+        $this->assertSame(0, ActivityLog::where('action', 'snapshot_reconciled')->count());
+    }
+
+    public function test_certificate_reconciliation_rejects_inconsistent_relationships_without_disclosure(): void
+    {
+        $courseInstitution = $this->createInstitution('RECONCILE-INCONSISTENT-COURSE');
+        $studentInstitution = $this->createInstitution('RECONCILE-INCONSISTENT-STUDENT');
+        [, $teacher] = $this->createTeacher($courseInstitution);
+        [, $student] = $this->createStudent($studentInstitution);
+        $course = $this->createCourse(
+            $courseInstitution,
+            $teacher,
+            'certificate-reconciliation-inconsistent'
+        );
+        $certificate = $this->createCertificate(
+            $course,
+            $student,
+            'CERT-RECONCILE-INCONSISTENT'
+        );
+        $originalAttributes = $certificate->fresh()->getAttributes();
+        $superAdmin = $this->createUserWithRole('super-admin');
+
+        $this->authenticate($superAdmin);
+
+        $this->postJson('/api/certificates/' . $certificate->id . '/reconcile')
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'Certificate cannot be reconciled.')
+            ->assertJsonMissingPath('data')
+            ->assertJsonMissingPath('student_name')
+            ->assertJsonMissingPath('course_title')
+            ->assertJsonMissingPath('institution_name');
+
+        $this->assertSame($originalAttributes, $certificate->fresh()->getAttributes());
+        $this->assertSame(0, Gradebook::count());
+        $this->assertSame(0, ActivityLog::where('action', 'snapshot_reconciled')->count());
+    }
+
+    public function test_certificate_reconciliation_keeps_teacher_and_super_admin_access_and_denies_learners(): void
+    {
+        $fixture = $this->createCertificateReconciliationFixture('RECONCILE-ROLES');
+
+        $this->authenticate($fixture['teacher_user']);
+        $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+            ->assertOk();
+
+        $this->authenticate($fixture['student_user']);
+        $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+            ->assertForbidden();
+
+        $parentUser = $this->createParent(
+            Institution::findOrFail($fixture['institution_id']),
+            $fixture['student']
+        );
+        $this->authenticate($parentUser);
+        $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+            ->assertForbidden();
+
+        $superAdmin = $this->createUserWithRole('super-admin');
+        $this->authenticate($superAdmin);
+        $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+            ->assertOk();
+
+        $this->assertDatabaseHas('activity_logs', [
+            'institution_id' => $fixture['institution_id'],
+            'user_id' => $superAdmin->id,
+            'module' => 'Certificate',
+            'action' => 'snapshot_reconciled',
+        ]);
+    }
+
+    public function test_certificate_reconciliation_does_not_reactivate_revoked_or_expired_certificates(): void
+    {
+        foreach ([
+            [
+                'suffix' => 'RECONCILE-REVOKED',
+                'status' => 'revoked',
+                'verification_status' => 'revoked',
+            ],
+            [
+                'suffix' => 'RECONCILE-EXPIRED',
+                'status' => 'issued',
+                'verification_status' => 'expired',
+            ],
+        ] as $case) {
+            $fixture = $this->createCertificateReconciliationFixture($case['suffix']);
+            $fixture['certificate']->update([
+                'status' => $case['status'],
+                'verification_status' => $case['verification_status'],
+            ]);
+            $originalAttributes = $fixture['certificate']->fresh()->getAttributes();
+
+            $this->authenticate($fixture['teacher_user']);
+
+            $this->postJson('/api/certificates/' . $fixture['certificate']->id . '/reconcile')
+                ->assertOk()
+                ->assertJsonPath('data.certificate.currently_valid', false)
+                ->assertJsonPath('data.certificate.status', $case['status'])
+                ->assertJsonPath(
+                    'data.certificate.verification_status',
+                    $case['verification_status']
+                );
+
+            $this->assertSame(
+                $originalAttributes,
+                $fixture['certificate']->fresh()->getAttributes()
+            );
+
+            $this->patchJson('/api/certificates/' . $fixture['certificate']->id, [
+                'status' => 'issued',
+                'verification_status' => 'valid',
+            ])->assertStatus(409)
+                ->assertJsonPath(
+                    'message',
+                    'Certificate reactivation requires a versioned reissue workflow.'
+                );
+
+            $this->assertSame(
+                $originalAttributes,
+                $fixture['certificate']->fresh()->getAttributes()
+            );
+        }
+    }
+
+    public function test_certificate_issuance_fails_closed_when_gradebook_recalculation_fails(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-GRADEBOOK-REFRESH-FAIL', false);
+        $gradebook = $this->createPassingGradebook($fixture['quiz']->course, $fixture['student']);
+        $certificate = $this->createCertificate(
+            $fixture['quiz']->course,
+            $fixture['student'],
+            'CERT-GRADEBOOK-REFRESH-FAIL-001'
+        );
+        $certificate->update([
+            'gradebook_id' => $gradebook->id,
+            'final_percentage' => 88.25,
+            'final_grade' => 'A',
+        ]);
+        $originalAttributes = $certificate->fresh()->getAttributes();
+        DB::statement(
+            "CREATE TRIGGER fail_gradebook_refresh " .
+            "BEFORE UPDATE ON gradebooks " .
+            "BEGIN SELECT RAISE(ABORT, 'simulated gradebook refresh failure'); END"
+        );
+        Storage::fake('certificates');
+        Pdf::shouldReceive('loadView')->never();
+
+        $this->authenticate($fixture['teacher_user']);
+        $this->postJson('/api/certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertStatus(503)
+            ->assertJsonPath(
+                'message',
+                'Certificate cannot be issued because current grades could not be established.'
+            );
+
+        $this->assertSame($originalAttributes, $certificate->fresh()->getAttributes());
+        $this->assertSame([], Storage::disk('certificates')->allFiles());
+    }
+
+    public function test_pending_certificate_results_are_redacted_from_student_parent_and_dashboard_responses_but_visible_to_staff(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-PENDING-READ', false);
+        $attempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $fixture['student']->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinutes(10),
+            'submitted_at' => now()->subMinutes(5),
+            'evaluated_at' => now()->subMinutes(4),
+            'total_marks' => 16,
+            'marks_obtained' => 12,
+            'percentage' => 75,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+        $answer = QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $fixture['manual_questions']['long_answer']->id,
+            'answer_text' => 'Legacy answer awaiting manual grading.',
+            'is_correct' => true,
+            'marks_obtained' => 5,
+            'manually_graded_at' => null,
+        ]);
+        $gradebook = Gradebook::create([
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+            'assignment_marks' => 80,
+            'quiz_marks' => 75,
+            'total_marks' => 155,
+            'maximum_marks' => 200,
+            'percentage' => 77.5,
+            'grade' => 'B',
+            'result_status' => 'passed',
+        ]);
+        $certificate = $this->createCertificate(
+            $fixture['quiz']->course,
+            $fixture['student'],
+            'CERT-PENDING-READ-001'
+        );
+        $certificate->update(['gradebook_id' => $gradebook->id]);
+        $parentUser = $this->createParent(
+            Institution::findOrFail($fixture['student']->institution_id),
+            $fixture['student']
+        );
+        $originalCertificate = $certificate->fresh()->getAttributes();
+
+        $this->authenticate($fixture['student_user']);
+        $studentList = $this->getJson('/api/my-certificates')
+            ->assertOk()
+            ->json('data.data.0');
+        $this->assertPendingCertificatePayload($studentList);
+        $studentDetail = $this->getJson('/api/certificates/' . $certificate->id)
+            ->assertOk()
+            ->json('data');
+        $this->assertPendingCertificatePayload($studentDetail);
+        $studentDashboard = $this->getJson('/api/student-dashboard/' . $fixture['student']->id)
+            ->assertOk()
+            ->json('data');
+        $this->assertPendingCertificatePayload($studentDashboard['certificates'][0]);
+        $this->assertPendingCertificatePayload(
+            $studentDashboard['student']['certificates'][0]
+        );
+
+        $this->authenticate($parentUser);
+        $parentList = $this->getJson('/api/certificates')
+            ->assertOk()
+            ->json('data.data.0');
+        $this->assertPendingCertificatePayload($parentList);
+        $parentDetail = $this->getJson('/api/certificates/' . $certificate->id)
+            ->assertOk()
+            ->json('data');
+        $this->assertPendingCertificatePayload($parentDetail);
+        $parentDashboard = $this->getJson('/api/parent-dashboard/' . $fixture['student']->id)
+            ->assertOk()
+            ->json('data');
+        $this->assertPendingCertificatePayload($parentDashboard['certificates'][0]);
+
+        $this->authenticate($fixture['teacher_user']);
+        $staffList = $this->getJson('/api/certificates')
+            ->assertOk()
+            ->json('data.data.0');
+        $this->assertSame('80.00', $staffList['final_percentage']);
+        $this->assertSame('B', $staffList['final_grade']);
+        $this->getJson('/api/certificates/' . $certificate->id)
+            ->assertOk()
+            ->assertJsonPath('data.final_percentage', '80.00')
+            ->assertJsonPath('data.final_grade', 'B')
+            ->assertJsonPath('data.gradebook.percentage', '77.50')
+            ->assertJsonPath('data.gradebook.result_status', 'passed');
+
+        $this->assertSame($originalCertificate, $certificate->fresh()->getAttributes());
+        $this->assertNull($answer->fresh()->manually_graded_at);
+    }
+
+    public function test_public_certificate_verification_suppresses_pending_results_and_restores_completed_result_behavior(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-PENDING-VERIFY', false);
+        $attempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $fixture['student']->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinutes(10),
+            'submitted_at' => now()->subMinutes(5),
+            'evaluated_at' => now()->subMinutes(4),
+            'total_marks' => 16,
+            'marks_obtained' => 12,
+            'percentage' => 75,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+        $answer = QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $fixture['manual_questions']['fill_blank']->id,
+            'answer_text' => 'Pending legacy answer.',
+            'is_correct' => true,
+            'marks_obtained' => 5,
+            'manually_graded_at' => null,
+        ]);
+        $certificate = $this->createCertificate(
+            $fixture['quiz']->course,
+            $fixture['student'],
+            'CERT-PENDING-VERIFY-001'
+        );
+        $originalCertificate = $certificate->fresh()->getAttributes();
+
+        $this->getJson('/api/verify-certificate/' . $certificate->verification_token)
+            ->assertUnprocessable()
+            ->assertJsonPath('valid', false)
+            ->assertJsonPath('message', 'Certificate is not valid.')
+            ->assertJsonMissingPath('status')
+            ->assertJsonMissingPath('grading_pending')
+            ->assertJsonMissingPath('data.final_percentage')
+            ->assertJsonMissingPath('data.final_grade')
+            ->assertJsonMissingPath('data.certificate_file')
+            ->assertJsonMissingPath('data.certificate_file_url');
+
+        $this->assertSame($originalCertificate, $certificate->fresh()->getAttributes());
+        $this->assertNull($answer->fresh()->manually_graded_at);
+
+        $answer->update(['manually_graded_at' => now()]);
+
+        $this->getJson('/api/verify-certificate/' . $certificate->verification_token)
+            ->assertOk()
+            ->assertJsonPath('valid', true)
+            ->assertJsonPath('data.final_percentage', '80.00')
+            ->assertJsonPath('data.final_grade', 'B');
+
+        $this->authenticate($fixture['student_user']);
+        $this->getJson('/api/my-certificates')
+            ->assertOk()
+            ->assertJsonPath('data.data.0.final_percentage', '80.00')
+            ->assertJsonPath('data.data.0.final_grade', 'B')
+            ->assertJsonPath('data.data.0.grading_pending', false)
+            ->assertJsonMissingPath('data.data.0.certificate_file')
+            ->assertJsonMissingPath('data.data.0.certificate_file_url');
+    }
+
+    public function test_new_certificate_pdfs_use_private_storage_and_responses_hide_internal_paths(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-PRIVATE-ISSUE', false);
+        $this->createPassingGradebook($fixture['quiz']->course, $fixture['student']);
+        $this->createPassingQuizAttempt($fixture['quiz'], $fixture['student']);
+        $this->createCertificateSetting(
+            Institution::findOrFail($fixture['student']->institution_id)
+        );
+
+        $certificateRoot = config('filesystems.disks.certificates.root');
+        $publicRoot = config('filesystems.disks.public.root');
+        $this->assertSame(storage_path('app/private/certificates'), $certificateRoot);
+        $this->assertSame(storage_path('app/public'), $publicRoot);
+        $this->assertFalse(Str::startsWith($certificateRoot, public_path()));
+        $this->assertSame(
+            storage_path('app/public'),
+            config('filesystems.links')[public_path('storage')]
+        );
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        $this->authenticate($fixture['teacher_user']);
+
+        $this->postJson('/api/certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertCreated()
+            ->assertJsonMissingPath('data.certificate_file')
+            ->assertJsonMissingPath('data.certificate_file_url')
+            ->assertJsonPath('data.status', 'issued');
+
+        $certificate = Certificate::where('course_id', $fixture['quiz']->course_id)
+            ->where('student_profile_id', $fixture['student']->id)
+            ->firstOrFail();
+        $this->assertNotEmpty($certificate->certificate_file);
+        $this->assertStringNotContainsString('/storage/', $certificate->certificate_file);
+        Storage::disk('certificates')->assertExists($certificate->certificate_file);
+        Storage::disk('public')->assertMissing($certificate->certificate_file);
+        $this->assertFileDoesNotExist(
+            public_path('storage/' . $certificate->certificate_file)
+        );
+
+        $this->getJson('/api/certificates/' . $certificate->id)
+            ->assertOk()
+            ->assertJsonMissingPath('data.certificate_file')
+            ->assertJsonMissingPath('data.certificate_file_url')
+            ->assertJsonPath('data.public_verification_url', $certificate->public_verification_url);
+
+        $this->authenticate($fixture['student_user']);
+        $this->getJson('/api/my-certificates')
+            ->assertOk()
+            ->assertJsonMissingPath('data.data.0.certificate_file')
+            ->assertJsonMissingPath('data.data.0.certificate_file_url')
+            ->assertJsonPath('data.data.0.public_verification_url', $certificate->public_verification_url);
+
+        $this->getJson('/api/verify-certificate/' . $certificate->verification_token)
+            ->assertOk()
+            ->assertJsonMissingPath('data.certificate_file')
+            ->assertJsonMissingPath('data.certificate_file_url')
+            ->assertJsonMissingPath('data.public_verification_url');
+    }
+
+    public function test_authorized_users_download_private_certificate_pdfs_without_changing_snapshots(): void
+    {
+        $institution = $this->createInstitution('CERT-PRIVATE-DOWNLOAD');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'certificate-private-download');
+        $this->createEnrollment($course, $student);
+        $certificate = $this->createCertificate($course, $student, 'CERT-PRIVATE-DOWNLOAD-001');
+        $certificate->update([
+            'final_percentage' => 73.25,
+            'final_grade' => 'C',
+            'certificate_file' => 'existing-private-certificate.pdf',
+        ]);
+        $originalSnapshot = $this->certificateSnapshot($certificate);
+        $parentUser = $this->createParent($institution, $student);
+        $institutionAdmin = $this->createInstitutionAdmin($institution);
+        $contents = '%PDF-1.4 private certificate fixture';
+
+        Storage::fake('certificates');
+        Storage::disk('certificates')->put('existing-private-certificate.pdf', $contents);
+
+        foreach ([$studentUser, $parentUser, $teacherUser, $institutionAdmin] as $user) {
+            $this->authenticate($user);
+
+            $response = $this->get('/api/certificates/' . $certificate->id . '/download')
+                ->assertDownload('existing-private-certificate.pdf');
+
+            $this->assertSame($contents, $response->streamedContent());
+            $this->assertSame($originalSnapshot, $this->certificateSnapshot($certificate->fresh()));
+        }
+    }
+
+    public function test_download_rejects_pending_revoked_and_expired_certificates(): void
+    {
+        $institution = $this->createInstitution('CERT-STATUS-DOWNLOAD');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+
+        $validCourse = $this->createCourse($institution, $teacher, 'certificate-status-valid');
+        $this->createEnrollment($validCourse, $student);
+        $validCertificate = $this->createCertificate(
+            $validCourse,
+            $student,
+            'CERT-STATUS-DOWNLOAD-VALID'
+        );
+        $validCertificate->update(['certificate_file' => 'valid-status.pdf']);
+
+        $nonValidCertificates = [];
+        foreach ([
+            ['name' => 'pending', 'status' => 'pending', 'verification_status' => 'valid'],
+            ['name' => 'revoked', 'status' => 'revoked', 'verification_status' => 'revoked'],
+            ['name' => 'expired', 'status' => 'issued', 'verification_status' => 'expired'],
+        ] as $case) {
+            $course = $this->createCourse(
+                $institution,
+                $teacher,
+                'certificate-status-' . $case['name']
+            );
+            $this->createEnrollment($course, $student);
+            $certificate = $this->createCertificate(
+                $course,
+                $student,
+                'CERT-STATUS-DOWNLOAD-' . strtoupper($case['name'])
+            );
+            $path = $case['name'] . '-status.pdf';
+            $certificate->update([
+                'status' => $case['status'],
+                'verification_status' => $case['verification_status'],
+                'certificate_file' => $path,
+            ]);
+            $nonValidCertificates[] = [$certificate, $path];
+        }
+
+        Storage::fake('certificates');
+        foreach (array_merge([[$validCertificate, 'valid-status.pdf']], $nonValidCertificates) as [, $path]) {
+            Storage::disk('certificates')->put($path, '%PDF-1.4 status fixture');
+        }
+
+        $this->authenticate($studentUser);
+        $this->get('/api/certificates/' . $validCertificate->id . '/download')
+            ->assertDownload('valid-status.pdf');
+
+        foreach ($nonValidCertificates as [$certificate]) {
+            $this->getJson('/api/certificates/' . $certificate->id . '/download')
+                ->assertUnprocessable()
+                ->assertJsonPath('message', 'Certificate is not available for download.')
+                ->assertJsonMissingPath('status');
+        }
+    }
+
+    public function test_public_verification_rejects_revoked_expired_and_pending_certificates_without_status_details(): void
+    {
+        $institution = $this->createInstitution('CERT-STATUS-VERIFY');
+        [, $teacher] = $this->createTeacher($institution);
+        [, $student] = $this->createStudent($institution);
+
+        $validCourse = $this->createCourse($institution, $teacher, 'certificate-verify-valid');
+        $validCertificate = $this->createCertificate(
+            $validCourse,
+            $student,
+            'CERT-STATUS-VERIFY-VALID'
+        );
+
+        $nonValidCertificates = [];
+        foreach ([
+            ['name' => 'revoked', 'status' => 'revoked', 'verification_status' => 'revoked'],
+            ['name' => 'expired', 'status' => 'issued', 'verification_status' => 'expired'],
+            ['name' => 'pending', 'status' => 'pending', 'verification_status' => 'valid'],
+        ] as $case) {
+            $course = $this->createCourse(
+                $institution,
+                $teacher,
+                'certificate-verify-' . $case['name']
+            );
+            $certificate = $this->createCertificate(
+                $course,
+                $student,
+                'CERT-STATUS-VERIFY-' . strtoupper($case['name'])
+            );
+            $certificate->update([
+                'status' => $case['status'],
+                'verification_status' => $case['verification_status'],
+            ]);
+            $nonValidCertificates[] = $certificate;
+        }
+
+        $this->getJson('/api/verify-certificate/' . $validCertificate->verification_token)
+            ->assertOk()
+            ->assertJsonPath('valid', true);
+
+        foreach ($nonValidCertificates as $certificate) {
+            $this->getJson('/api/verify-certificate/' . $certificate->verification_token)
+                ->assertUnprocessable()
+                ->assertJsonPath('valid', false)
+                ->assertJsonPath('message', 'Certificate is not valid.')
+                ->assertJsonMissingPath('status')
+                ->assertJsonMissingPath('data');
+        }
+    }
+
+    public function test_public_verification_rejects_cross_institution_certificate_without_disclosing_metadata(): void
+    {
+        $courseInstitution = $this->createInstitution('CERT-VERIFY-CONSISTENCY-COURSE');
+        $studentInstitution = $this->createInstitution('CERT-VERIFY-CONSISTENCY-STUDENT');
+        [, $teacher] = $this->createTeacher($courseInstitution);
+        [, $student] = $this->createStudent($studentInstitution);
+        $course = $this->createCourse(
+            $courseInstitution,
+            $teacher,
+            'certificate-verify-cross-institution'
+        );
+        $certificate = $this->createCertificate(
+            $course,
+            $student,
+            'CERT-VERIFY-CROSS-INSTITUTION-001'
+        );
+        $certificate->update([
+            'final_percentage' => 98.75,
+            'final_grade' => 'PRIVATE-GRADE-SENTINEL',
+        ]);
+
+        $this->getJson('/api/verify-certificate/' . $certificate->verification_token)
+            ->assertUnprocessable()
+            ->assertExactJson([
+                'message' => 'Certificate is not valid.',
+                'valid' => false,
+            ]);
+
+        $this->assertDatabaseHas('certificates', [
+            'id' => $certificate->id,
+            'status' => 'issued',
+            'verification_status' => 'valid',
+            'final_percentage' => 98.75,
+            'final_grade' => 'PRIVATE-GRADE-SENTINEL',
+        ]);
+    }
+
+    public function test_public_verification_rejects_certificate_with_soft_deleted_course_without_metadata(): void
+    {
+        $institution = $this->createInstitution('CERT-VERIFY-MISSING-COURSE');
+        [, $teacher] = $this->createTeacher($institution);
+        [, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'certificate-verify-deleted-course');
+        $certificate = $this->createCertificate(
+            $course,
+            $student,
+            'CERT-VERIFY-DELETED-COURSE-001'
+        );
+        $course->delete();
+
+        $this->getJson('/api/verify-certificate/' . $certificate->verification_token)
+            ->assertUnprocessable()
+            ->assertExactJson([
+                'message' => 'Certificate is not valid.',
+                'valid' => false,
+            ]);
+
+        $this->assertDatabaseHas('certificates', [
+            'id' => $certificate->id,
+            'status' => 'issued',
+            'verification_status' => 'valid',
+        ]);
+        $this->assertSoftDeleted('courses', ['id' => $course->id]);
+    }
+
+    public function test_generation_of_expired_certificate_is_denied_without_changing_status_or_grade_snapshot(): void
+    {
+        $institution = $this->createInstitution('CERT-STATUS-GENERATE');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'certificate-status-generate');
+        $this->createEnrollment($course, $student);
+        $certificate = $this->createCertificate(
+            $course,
+            $student,
+            'CERT-STATUS-GENERATE-EXPIRED'
+        );
+        $certificate->update([
+            'final_percentage' => 73.25,
+            'final_grade' => 'C',
+            'verification_status' => 'expired',
+        ]);
+        $originalSnapshot = $this->certificateSnapshot($certificate);
+
+        Storage::fake('certificates');
+
+        $this->authenticate($teacherUser);
+        $this->postJson('/api/certificates/' . $certificate->id . '/generate')
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'Certificate is not available for PDF generation.')
+            ->assertJsonMissingPath('status');
+
+        $generatedCertificate = $certificate->fresh();
+        $this->assertSame('issued', $generatedCertificate->status);
+        $this->assertSame('expired', $generatedCertificate->verification_status);
+        $this->assertSame($originalSnapshot, $this->certificateSnapshot($generatedCertificate));
+        $this->assertNull($generatedCertificate->certificate_file);
+        $this->assertSame([], Storage::disk('certificates')->allFiles());
+    }
+
+    public function test_legacy_public_pdf_download_regenerates_ephemerally_without_rewriting_the_record_or_old_file(): void
+    {
+        $institution = $this->createInstitution('CERT-LEGACY-PUBLIC');
+        [, $teacher] = $this->createTeacher($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'certificate-legacy-public');
+        $this->createEnrollment($course, $student);
+        $certificate = $this->createCertificate($course, $student, 'CERT-LEGACY-001');
+        $this->createCertificateSetting($institution);
+        $legacyPath = 'certificates/certificate-CERT-LEGACY-001.pdf';
+        $legacyContents = 'unchanged public certificate bytes';
+        $certificate->update(['certificate_file' => $legacyPath]);
+        $originalAttributes = $certificate->fresh()->getAttributes();
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        Storage::disk('public')->put($legacyPath, $legacyContents);
+        $this->authenticate($studentUser);
+
+        $response = $this->get('/api/certificates/' . $certificate->id . '/download')
+            ->assertDownload('certificate-cert-legacy-001.pdf');
+
+        $this->assertStringStartsWith('%PDF', $response->getContent());
+        $this->assertSame($originalAttributes, $certificate->fresh()->getAttributes());
+        Storage::disk('public')->assertExists($legacyPath);
+        $this->assertSame($legacyContents, Storage::disk('public')->get($legacyPath));
+        $this->assertSame([], Storage::disk('certificates')->allFiles());
+    }
+
+    public function test_failed_certificate_render_does_not_leave_a_successful_issuance(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-PRIVATE-RENDER-FAIL', false);
+        $this->createPassingGradebook($fixture['quiz']->course, $fixture['student']);
+        $this->createPassingQuizAttempt($fixture['quiz'], $fixture['student']);
+        $this->createCertificateSetting(
+            Institution::findOrFail($fixture['student']->institution_id)
+        );
+        Storage::fake('certificates');
+        Pdf::shouldReceive('loadView')
+            ->once()
+            ->andThrow(new \RuntimeException('Simulated PDF render failure.'));
+        $this->authenticate($fixture['teacher_user']);
+
+        $this->postJson('/api/certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertServerError()
+            ->assertJsonPath('message', 'Certificate PDF generation failed.');
+
+        $this->assertDatabaseMissing('certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ]);
+        $this->assertSame([], Storage::disk('certificates')->allFiles());
+    }
+
+    public function test_failed_certificate_storage_does_not_leave_a_successful_issuance(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-PRIVATE-STORAGE-FAIL', false);
+        $this->createPassingGradebook($fixture['quiz']->course, $fixture['student']);
+        $this->createPassingQuizAttempt($fixture['quiz'], $fixture['student']);
+        $this->createCertificateSetting(
+            Institution::findOrFail($fixture['student']->institution_id)
+        );
+        $pdf = \Mockery::mock(\Barryvdh\DomPDF\PDF::class);
+        $pdf->shouldReceive('setPaper')->once()->with('a4', 'landscape')->andReturnSelf();
+        $pdf->shouldReceive('output')->once()->andReturn('%PDF-1.4 fixture');
+        Pdf::shouldReceive('loadView')->once()->andReturn($pdf);
+
+        Storage::fake('public');
+        $publicDisk = Storage::disk('public');
+        $disk = \Mockery::mock();
+        $disk->shouldReceive('put')->once()->andReturn(false);
+        $disk->shouldReceive('exists')->atLeast()->once()->andReturn(false);
+        Storage::shouldReceive('disk')
+            ->with('certificates')
+            ->atLeast()->once()
+            ->andReturn($disk);
+        Storage::shouldReceive('disk')
+            ->with('public')
+            ->atLeast()->once()
+            ->andReturn($publicDisk);
+        $this->authenticate($fixture['teacher_user']);
+
+        $this->postJson('/api/certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertServerError()
+            ->assertJsonPath('message', 'Certificate PDF generation failed.');
+
+        $this->assertDatabaseMissing('certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ]);
+    }
+
+    public function test_certificate_path_persistence_failure_rolls_back_issuance_and_cleans_new_pdf(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-PRIVATE-DB-FAIL', false);
+        $this->createPassingGradebook($fixture['quiz']->course, $fixture['student']);
+        $this->createPassingQuizAttempt($fixture['quiz'], $fixture['student']);
+        $this->createCertificateSetting(
+            Institution::findOrFail($fixture['student']->institution_id)
+        );
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        $this->failCertificateFilePathPersistence();
+
+        $pdf = \Mockery::mock(\Barryvdh\DomPDF\PDF::class);
+        $pdf->shouldReceive('setPaper')->once()->with('a4', 'landscape')->andReturnSelf();
+        $pdf->shouldReceive('output')->once()->andReturn('%PDF-1.4 transaction fixture');
+        Pdf::shouldReceive('loadView')->once()->andReturn($pdf);
+
+        $this->authenticate($fixture['teacher_user']);
+        $this->postJson('/api/certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertServerError()
+            ->assertJsonPath('message', 'Certificate PDF generation failed.');
+
+        $this->assertDatabaseMissing('certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ]);
+        $this->assertSame([], Storage::disk('certificates')->allFiles());
+    }
+
+    public function test_certificate_regeneration_associates_new_pdf_before_deleting_old_pdf(): void
+    {
+        $institution = $this->createInstitution('CERT-REPLACE-ORDER');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'certificate-replace-order');
+        $this->createEnrollment($course, $student);
+        $certificate = $this->createCertificate($course, $student, 'CERT-REPLACE-ORDER-001');
+        $oldPath = 'old-private-certificate.pdf';
+        $certificate->update([
+            'final_percentage' => 73.25,
+            'final_grade' => 'C',
+            'certificate_file' => $oldPath,
+        ]);
+        $originalSnapshot = $this->certificateSnapshot($certificate);
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        $disk = Storage::disk('certificates');
+        $publicDisk = Storage::disk('public');
+        $disk->put($oldPath, '%PDF-1.4 old private certificate');
+        $newFileWasAssociatedBeforeOldDelete = false;
+        $diskSpy = \Mockery::mock($disk)->makePartial();
+        $diskSpy->shouldReceive('delete')
+            ->once()
+            ->with($oldPath)
+            ->andReturnUsing(function (string $path) use (
+                $disk,
+                $certificate,
+                $oldPath,
+                &$newFileWasAssociatedBeforeOldDelete
+            ): bool {
+                $newPath = $certificate->fresh()->certificate_file;
+                $newFileWasAssociatedBeforeOldDelete =
+                    $newPath !== $oldPath &&
+                    $disk->exists($newPath) &&
+                    $disk->exists($oldPath);
+
+                return $disk->delete($path);
+            });
+        Storage::shouldReceive('disk')->with('certificates')->atLeast()->once()->andReturn($diskSpy);
+        Storage::shouldReceive('disk')->with('public')->atLeast()->once()->andReturn($publicDisk);
+
+        $pdf = \Mockery::mock(\Barryvdh\DomPDF\PDF::class);
+        $pdf->shouldReceive('setPaper')->once()->with('a4', 'landscape')->andReturnSelf();
+        $pdf->shouldReceive('output')->once()->andReturn('%PDF-1.4 replacement certificate');
+        Pdf::shouldReceive('loadView')->once()->andReturn($pdf);
+
+        $this->authenticate($teacherUser);
+        $this->postJson('/api/certificates/' . $certificate->id . '/generate')->assertOk();
+
+        $replacement = $certificate->fresh();
+        $this->assertTrue($newFileWasAssociatedBeforeOldDelete);
+        $this->assertNotSame($oldPath, $replacement->certificate_file);
+        $this->assertTrue($disk->exists($replacement->certificate_file));
+        $this->assertFalse($disk->exists($oldPath));
+        $this->assertSame($originalSnapshot, $this->certificateSnapshot($replacement));
+    }
+
+    public function test_failed_certificate_replacement_preserves_old_pdf_and_reference(): void
+    {
+        $institution = $this->createInstitution('CERT-REPLACE-FAIL');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'certificate-replace-fail');
+        $this->createEnrollment($course, $student);
+        $certificate = $this->createCertificate($course, $student, 'CERT-REPLACE-FAIL-001');
+        $oldPath = 'usable-old-certificate.pdf';
+        $certificate->update(['certificate_file' => $oldPath]);
+        $originalSnapshot = $this->certificateSnapshot($certificate);
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        Storage::disk('certificates')->put($oldPath, '%PDF-1.4 old usable certificate');
+        $this->failCertificateFilePathPersistence();
+
+        $pdf = \Mockery::mock(\Barryvdh\DomPDF\PDF::class);
+        $pdf->shouldReceive('setPaper')->once()->with('a4', 'landscape')->andReturnSelf();
+        $pdf->shouldReceive('output')->once()->andReturn('%PDF-1.4 replacement certificate');
+        Pdf::shouldReceive('loadView')->once()->andReturn($pdf);
+
+        $this->authenticate($teacherUser);
+        $this->postJson('/api/certificates/' . $certificate->id . '/generate')
+            ->assertServerError()
+            ->assertJsonPath('message', 'Certificate PDF generation failed.')
+            ->assertJsonMissing(['file_path' => $oldPath]);
+
+        $freshCertificate = $certificate->fresh();
+        $this->assertSame($oldPath, $freshCertificate->certificate_file);
+        $this->assertSame($originalSnapshot, $this->certificateSnapshot($freshCertificate));
+        Storage::disk('certificates')->assertExists($oldPath);
+        $this->assertSame([$oldPath], Storage::disk('certificates')->allFiles());
+    }
+
+    public function test_duplicate_certificate_issuance_preserves_the_historical_snapshot_and_pdf(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('CERT-REISSUE-REPLACE', false);
+        $gradebook = $this->createPassingGradebook($fixture['quiz']->course, $fixture['student']);
+        $this->createPassingQuizAttempt($fixture['quiz'], $fixture['student']);
+        $certificate = $this->createCertificate(
+            $fixture['quiz']->course,
+            $fixture['student'],
+            'CERT-REISSUE-REPLACE-001'
+        );
+        $certificate->update(['gradebook_id' => $gradebook->id]);
+        $oldPath = 'reissued-old-private-certificate.pdf';
+        $certificate->update(['certificate_file' => $oldPath]);
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        Storage::disk('certificates')->put($oldPath, '%PDF-1.4 old reissued certificate');
+        $originalAttributes = $certificate->fresh()->getAttributes();
+        Pdf::shouldReceive('loadView')->never();
+
+        $this->authenticate($fixture['teacher_user']);
+        $this->postJson('/api/certificates', [
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertStatus(409)
+            ->assertJsonPath(
+                'message',
+                'A certificate already exists for this student and course.'
+            );
+
+        $preservedCertificate = $certificate->fresh();
+        $this->assertSame($originalAttributes, $preservedCertificate->getAttributes());
+        $this->assertSame($oldPath, $preservedCertificate->certificate_file);
+        $this->assertSame('75.00', $gradebook->fresh()->percentage);
+        $this->assertSame('B+', $gradebook->fresh()->grade);
+        $this->assertSame('passed', $gradebook->fresh()->result_status);
+        Storage::disk('certificates')->assertExists($oldPath);
+        $this->assertSame([$oldPath], Storage::disk('certificates')->allFiles());
+    }
+
+    public function test_certificate_cleanup_failure_is_logged_and_old_file_is_not_reported_as_removed(): void
+    {
+        $institution = $this->createInstitution('CERT-CLEANUP-FAIL');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'certificate-cleanup-fail');
+        $this->createEnrollment($course, $student);
+        $certificate = $this->createCertificate($course, $student, 'CERT-CLEANUP-FAIL-001');
+        $oldPath = 'old-pdf-that-cannot-be-deleted.pdf';
+        $certificate->update(['certificate_file' => $oldPath]);
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        $disk = Storage::disk('certificates');
+        $publicDisk = Storage::disk('public');
+        $disk->put($oldPath, '%PDF-1.4 retained old certificate');
+        $diskSpy = \Mockery::mock($disk)->makePartial();
+        $diskSpy->shouldReceive('delete')->once()->with($oldPath)->andReturn(false);
+        Storage::shouldReceive('disk')->with('certificates')->atLeast()->once()->andReturn($diskSpy);
+        Storage::shouldReceive('disk')->with('public')->atLeast()->once()->andReturn($publicDisk);
+        Log::shouldReceive('error')
+            ->once()
+            ->withArgs(function (string $message, array $context) use ($oldPath, $certificate): bool {
+                return $message === 'Private certificate PDF cleanup failed.' &&
+                    $context['certificate_id'] === $certificate->id &&
+                    $context['file_path'] === $oldPath &&
+                    $context['delete_returned'] === false &&
+                    $context['file_still_exists'] === true;
+            });
+
+        $pdf = \Mockery::mock(\Barryvdh\DomPDF\PDF::class);
+        $pdf->shouldReceive('setPaper')->once()->with('a4', 'landscape')->andReturnSelf();
+        $pdf->shouldReceive('output')->once()->andReturn('%PDF-1.4 replacement certificate');
+        Pdf::shouldReceive('loadView')->once()->andReturn($pdf);
+
+        $this->authenticate($teacherUser);
+        $response = $this->postJson('/api/certificates/' . $certificate->id . '/generate')
+            ->assertOk();
+
+        $newPath = $certificate->fresh()->certificate_file;
+        $this->assertNotSame($oldPath, $newPath);
+        $this->assertTrue($disk->exists($newPath));
+        $this->assertTrue($disk->exists($oldPath));
+        $this->assertStringNotContainsString('removed', strtolower($response->getContent()));
+    }
+
+    public function test_certificate_delete_removes_only_unreferenced_private_pdf_and_preserves_public_pdf(): void
+    {
+        $institution = $this->createInstitution('CERT-DELETE-LIFECYCLE');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [, $firstStudent] = $this->createStudent($institution);
+        [, $secondStudent] = $this->createStudent($institution);
+        [, $thirdStudent] = $this->createStudent($institution);
+        $firstCourse = $this->createCourse($institution, $teacher, 'certificate-delete-first');
+        $secondCourse = $this->createCourse($institution, $teacher, 'certificate-delete-second');
+        $thirdCourse = $this->createCourse($institution, $teacher, 'certificate-delete-third');
+        $this->createEnrollment($firstCourse, $firstStudent);
+        $this->createEnrollment($secondCourse, $secondStudent);
+        $this->createEnrollment($thirdCourse, $thirdStudent);
+        $firstCertificate = $this->createCertificate($firstCourse, $firstStudent, 'CERT-DELETE-001');
+        $secondCertificate = $this->createCertificate($secondCourse, $secondStudent, 'CERT-DELETE-002');
+        $thirdCertificate = $this->createCertificate($thirdCourse, $thirdStudent, 'CERT-DELETE-003');
+        $sharedPath = 'shared-certificate.pdf';
+        $privatePath = 'intended-private-certificate.pdf';
+        $legacyPublicPath = 'certificates/legacy-public-certificate.pdf';
+        $firstCertificate->update(['certificate_file' => $sharedPath]);
+        $secondCertificate->update(['certificate_file' => $sharedPath]);
+        $thirdCertificate->update(['certificate_file' => $privatePath]);
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        Storage::disk('certificates')->put($sharedPath, '%PDF shared');
+        Storage::disk('certificates')->put($privatePath, '%PDF private');
+        Storage::disk('public')->put($legacyPublicPath, '%PDF legacy public');
+
+        $legacyCertificate = $this->createCertificate(
+            $thirdCourse,
+            $this->createStudent($institution)[1],
+            'CERT-DELETE-004'
+        );
+        $legacyCertificate->update(['certificate_file' => $legacyPublicPath]);
+        $this->createEnrollment($thirdCourse, $legacyCertificate->studentProfile);
+
+        $this->authenticate($teacherUser);
+        $this->deleteJson('/api/certificates/' . $firstCertificate->id)->assertOk();
+        $this->deleteJson('/api/certificates/' . $thirdCertificate->id)->assertOk();
+        $this->deleteJson('/api/certificates/' . $legacyCertificate->id)->assertOk();
+
+        $this->assertTrue(Certificate::withTrashed()->findOrFail($firstCertificate->id)->trashed());
+        $this->assertTrue(Certificate::withTrashed()->findOrFail($thirdCertificate->id)->trashed());
+        $this->assertTrue(Certificate::withTrashed()->findOrFail($legacyCertificate->id)->trashed());
+        Storage::disk('certificates')->assertExists($sharedPath);
+        Storage::disk('certificates')->assertMissing($privatePath);
+        Storage::disk('public')->assertExists($legacyPublicPath);
+        $this->assertFalse($secondCertificate->fresh()->trashed());
+    }
+
+    public function test_legacy_download_attempts_temporary_pdf_cleanup_after_read_failure(): void
+    {
+        $institution = $this->createInstitution('CERT-LEGACY-READ-FAIL');
+        [, $teacher] = $this->createTeacher($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'certificate-legacy-read-fail');
+        $this->createEnrollment($course, $student);
+        $certificate = $this->createCertificate($course, $student, 'CERT-LEGACY-READ-FAIL-001');
+        $certificate->update(['certificate_file' => null]);
+        $originalAttributes = $certificate->fresh()->getAttributes();
+
+        Storage::fake('certificates');
+        Storage::fake('public');
+        $disk = Storage::disk('certificates');
+        $publicDisk = Storage::disk('public');
+        $temporaryPath = null;
+        $cleanupSawTemporaryFile = false;
+        $diskSpy = \Mockery::mock($disk)->makePartial();
+        $diskSpy->shouldReceive('get')
+            ->once()
+            ->andThrow(new \RuntimeException('Simulated temporary PDF read failure.'));
+        $diskSpy->shouldReceive('delete')
+            ->once()
+            ->andReturnUsing(function (string $path) use (
+                $disk,
+                &$temporaryPath,
+                &$cleanupSawTemporaryFile
+            ): bool {
+                $temporaryPath = $path;
+                $cleanupSawTemporaryFile = $disk->exists($path);
+
+                return $disk->delete($path);
+            });
+        Storage::shouldReceive('disk')->with('certificates')->atLeast()->once()->andReturn($diskSpy);
+        Storage::shouldReceive('disk')->with('public')->atLeast()->once()->andReturn($publicDisk);
+
+        $pdf = \Mockery::mock(\Barryvdh\DomPDF\PDF::class);
+        $pdf->shouldReceive('setPaper')->once()->with('a4', 'landscape')->andReturnSelf();
+        $pdf->shouldReceive('output')->once()->andReturn('%PDF-1.4 temporary certificate');
+        Pdf::shouldReceive('loadView')->once()->andReturn($pdf);
+
+        $this->authenticate($studentUser);
+        $this->get('/api/certificates/' . $certificate->id . '/download')
+            ->assertServerError()
+            ->assertJsonPath('message', 'Certificate PDF is currently unavailable.');
+
+        $this->assertNotNull($temporaryPath);
+        $this->assertTrue($cleanupSawTemporaryFile);
+        $this->assertSame($originalAttributes, $certificate->fresh()->getAttributes());
+        $this->assertFalse($disk->exists($temporaryPath));
+        $this->assertSame([], $disk->allFiles());
     }
 
     public function test_lesson_progress_enforces_ownership_and_parent_read_only_access(): void
@@ -683,7 +2807,7 @@ class ImmediateSecurityFixesTest extends TestCase
     public function test_moved_lesson_clears_foreign_section_and_target_assessments_still_require_evidence(): void
     {
         $institution = $this->createInstitution('LESSON-MOVE-TARGET-EVIDENCE');
-        [, $teacher] = $this->createTeacher($institution);
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
         $adminUser = $this->createInstitutionAdmin($institution);
         [$studentUser, $student] = $this->createStudent($institution);
         $sourceCourse = $this->createCourse($institution, $teacher, 'lesson-section-source');
@@ -692,6 +2816,12 @@ class ImmediateSecurityFixesTest extends TestCase
         $sourceSection = CourseSection::create([
             'course_id' => $sourceCourse->id,
             'title' => 'Source-only section',
+            'sort_order' => 1,
+            'status' => 'active',
+        ]);
+        $targetSection = CourseSection::create([
+            'course_id' => $targetCourse->id,
+            'title' => 'Target section',
             'sort_order' => 1,
             'status' => 'active',
         ]);
@@ -723,7 +2853,9 @@ class ImmediateSecurityFixesTest extends TestCase
         $assignment->update(['lesson_id' => $lesson->id]);
 
         // Simulate a pre-existing stale section reference and verify it is not serialized to students.
-        $lesson->update(['course_section_id' => $sourceSection->id]);
+        $lesson->refresh()->update(['course_section_id' => $sourceSection->id]);
+        $validLesson = $this->createLesson($targetCourse, 'Lesson with a valid section');
+        $validLesson->update(['course_section_id' => $targetSection->id]);
         $this->authenticate($studentUser);
         $this->getJson('/api/student-courses/' . $targetCourse->id . '/lessons')
             ->assertOk()
@@ -739,8 +2871,61 @@ class ImmediateSecurityFixesTest extends TestCase
             'lesson_id' => $lesson->id,
             'status' => 'in_progress',
             'progress_percentage' => 80,
-        ])->assertCreated();
+        ])->assertCreated()
+            ->assertJsonPath('data.lesson.id', $lesson->id)
+            ->assertJsonPath('data.lesson.course_section_id', null)
+            ->assertJsonPath('data.lesson.course_section', null);
         $progressId = $progressResponse->json('data.id');
+        $validProgressResponse = $this->postJson('/api/lesson-progress', [
+            'course_enrollment_id' => $enrollment->id,
+            'lesson_id' => $validLesson->id,
+            'status' => 'in_progress',
+            'progress_percentage' => 25,
+        ])->assertCreated()
+            ->assertJsonPath('data.lesson.id', $validLesson->id)
+            ->assertJsonPath('data.lesson.course_section_id', $targetSection->id);
+        $validProgressId = $validProgressResponse->json('data.id');
+
+        $this->assertDatabaseHas('lessons', [
+            'id' => $lesson->id,
+            'course_id' => $targetCourse->id,
+            'course_section_id' => $sourceSection->id,
+        ]);
+
+        $progressRecords = collect(
+            $this->getJson('/api/lesson-progress')
+                ->assertOk()
+                ->json('data.data')
+        );
+        $staleProgressData = $progressRecords->firstWhere('id', $progressId);
+        $validProgressData = $progressRecords->firstWhere('id', $validProgressId);
+        $this->assertSame(null, data_get($staleProgressData, 'lesson.course_section_id'));
+        $this->assertSame(null, data_get($staleProgressData, 'lesson.course_section'));
+        $this->assertSame(
+            $targetSection->id,
+            data_get($validProgressData, 'lesson.course_section_id')
+        );
+        $this->assertArrayNotHasKey('course_section', $validProgressData['lesson']);
+
+        $this->getJson('/api/lesson-progress/' . $progressId)
+            ->assertOk()
+            ->assertJsonPath('data.lesson.course_section_id', null)
+            ->assertJsonPath('data.lesson.course_section', null);
+        $validShowData = $this->getJson('/api/lesson-progress/' . $validProgressId)
+            ->assertOk()
+            ->assertJsonPath('data.lesson.course_section_id', $targetSection->id)
+            ->json('data');
+        $this->assertArrayNotHasKey('course_section', $validShowData['lesson']);
+
+        $this->patchJson('/api/lesson-progress/' . $progressId, [
+            'watch_time_minutes' => 6,
+        ])->assertOk()
+            ->assertJsonPath('data.lesson.course_section_id', null)
+            ->assertJsonPath('data.lesson.course_section', null);
+        $this->patchJson('/api/lesson-progress/' . $validProgressId, [
+            'watch_time_minutes' => 7,
+        ])->assertOk()
+            ->assertJsonPath('data.lesson.course_section_id', $targetSection->id);
 
         $this->postJson('/api/lesson-progress/' . $progressId . '/complete')
             ->assertUnprocessable()
@@ -773,7 +2958,24 @@ class ImmediateSecurityFixesTest extends TestCase
 
         $this->postJson('/api/lesson-progress/' . $progressId . '/complete')
             ->assertOk()
-            ->assertJsonPath('data.status', 'completed');
+            ->assertJsonPath('data.status', 'completed')
+            ->assertJsonPath('data.lesson.course_section_id', null)
+            ->assertJsonPath('data.lesson.course_section', null);
+
+        $this->authenticate($teacherUser);
+        $this->postJson('/api/lesson-progress/' . $validProgressId . '/complete')
+            ->assertOk()
+            ->assertJsonPath('data.status', 'completed')
+            ->assertJsonPath('data.lesson.course_section_id', $targetSection->id);
+
+        $this->assertDatabaseHas('lessons', [
+            'id' => $lesson->id,
+            'course_section_id' => $sourceSection->id,
+        ]);
+        $this->assertDatabaseHas('lessons', [
+            'id' => $validLesson->id,
+            'course_section_id' => $targetSection->id,
+        ]);
     }
 
     public function test_students_cannot_forge_lesson_completion_and_staff_can_complete_and_recalculate_progress(): void
@@ -1080,6 +3282,772 @@ class ImmediateSecurityFixesTest extends TestCase
             ->assertJsonPath('data.status', 'completed');
     }
 
+    public function test_automatic_quiz_attempt_is_evaluated_on_submission_and_unlocks_lesson_with_all_evidence(): void
+    {
+        $institution = $this->createInstitution('AUTOMATIC-QUIZ-SUBMISSION');
+        [, $teacher] = $this->createTeacher($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'automatic-quiz-submission');
+        $enrollment = $this->createEnrollment($course, $student);
+        $lesson = $this->createLesson($course, 'Automatic quiz lesson');
+        $assignment = $this->createAssignment($course, $teacher, 'Required lesson assignment');
+        $assignment->update(['lesson_id' => $lesson->id]);
+
+        $quiz = Quiz::create([
+            'course_id' => $course->id,
+            'lesson_id' => $lesson->id,
+            'teacher_profile_id' => $teacher->id,
+            'title' => 'Automatic grading quiz',
+            'total_marks' => 10,
+            'passing_marks' => 5,
+            'status' => 'published',
+        ]);
+        $questions = [];
+        $options = [];
+
+        foreach (['First question', 'Second question'] as $index => $questionText) {
+            $question = QuestionBank::create([
+                'course_id' => $course->id,
+                'lesson_id' => $lesson->id,
+                'question_text' => $questionText,
+                'question_type' => 'mcq',
+                'marks' => 5,
+                'status' => 'active',
+            ]);
+            QuizQuestion::create([
+                'quiz_id' => $quiz->id,
+                'question_bank_id' => $question->id,
+                'marks' => 5,
+                'sort_order' => $index + 1,
+            ]);
+
+            $options[] = [
+                'correct' => QuestionOption::create([
+                    'question_bank_id' => $question->id,
+                    'option_text' => 'Correct',
+                    'is_correct' => true,
+                    'sort_order' => 1,
+                ]),
+                'incorrect' => QuestionOption::create([
+                    'question_bank_id' => $question->id,
+                    'option_text' => 'Incorrect',
+                    'is_correct' => false,
+                    'sort_order' => 2,
+                ]),
+            ];
+            $questions[] = $question;
+        }
+
+        $this->authenticate($studentUser);
+        $progressResponse = $this->postJson('/api/lesson-progress', [
+            'course_enrollment_id' => $enrollment->id,
+            'lesson_id' => $lesson->id,
+            'status' => 'in_progress',
+            'progress_percentage' => 80,
+        ])->assertCreated();
+        $progressId = $progressResponse->json('data.id');
+
+        $this->postJson('/api/lesson-progress/' . $progressId . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        $failedAttemptId = $this->postJson('/api/quiz-attempts', [
+            'quiz_id' => $quiz->id,
+            'student_profile_id' => $student->id,
+        ])->assertCreated()->json('data.id');
+
+        foreach ($questions as $index => $question) {
+            $this->postJson('/api/quiz-answers', [
+                'quiz_attempt_id' => $failedAttemptId,
+                'question_bank_id' => $question->id,
+                'question_option_id' => $options[$index]['incorrect']->id,
+            ])->assertCreated();
+        }
+
+        $failedAttempt = QuizAttempt::findOrFail($failedAttemptId);
+        $this->assertSame('in_progress', $failedAttempt->status);
+        $this->assertNull($failedAttempt->submitted_at);
+        $this->assertNull($failedAttempt->evaluated_at);
+
+        $this->patchJson('/api/quiz-attempts/' . $failedAttemptId, [
+            'status' => 'submitted',
+        ])->assertOk()
+            ->assertJsonPath('data.status', 'evaluated')
+            ->assertJsonPath('data.result_status', 'failed')
+            ->assertJsonPath('data.marks_obtained', '0.00')
+            ->assertJsonPath('data.percentage', '0.00');
+
+        $failedAttempt->refresh();
+        $this->assertNotNull($failedAttempt->submitted_at);
+        $this->assertNotNull($failedAttempt->evaluated_at);
+        $this->assertTrue(
+            $failedAttempt->submitted_at->lessThanOrEqualTo($failedAttempt->evaluated_at)
+        );
+
+        $passedAttemptId = $this->postJson('/api/quiz-attempts', [
+            'quiz_id' => $quiz->id,
+            'student_profile_id' => $student->id,
+        ])->assertCreated()->json('data.id');
+
+        $this->postJson('/api/quiz-answers', [
+            'quiz_attempt_id' => $passedAttemptId,
+            'question_bank_id' => $questions[0]->id,
+            'question_option_id' => $options[0]['correct']->id,
+        ])->assertCreated();
+        $this->postJson('/api/quiz-answers', [
+            'quiz_attempt_id' => $passedAttemptId,
+            'question_bank_id' => $questions[1]->id,
+            'question_option_id' => $options[1]['incorrect']->id,
+        ])->assertCreated();
+
+        $passedAttempt = QuizAttempt::findOrFail($passedAttemptId);
+        $this->assertSame('in_progress', $passedAttempt->status);
+        $this->assertSame('5.00', $passedAttempt->marks_obtained);
+        $this->assertNull($passedAttempt->evaluated_at);
+
+        $this->patchJson('/api/quiz-attempts/' . $passedAttemptId, [
+            'status' => 'submitted',
+        ])->assertOk()
+            ->assertJsonPath('data.status', 'evaluated')
+            ->assertJsonPath('data.result_status', 'passed')
+            ->assertJsonPath('data.marks_obtained', '5.00')
+            ->assertJsonPath('data.percentage', '50.00');
+
+        $passedAttempt->refresh();
+        $this->assertNotNull($passedAttempt->submitted_at);
+        $this->assertNotNull($passedAttempt->evaluated_at);
+
+        $this->postJson('/api/lesson-progress/' . $progressId . '/complete')
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('assessment');
+
+        $this->postJson('/api/assignment-submissions', [
+            'assignment_id' => $assignment->id,
+            'student_profile_id' => $student->id,
+            'submission_text' => 'Completed assignment response',
+            'status' => 'submitted',
+        ])->assertCreated();
+
+        $this->postJson('/api/lesson-progress/' . $progressId . '/complete')
+            ->assertOk()
+            ->assertJsonPath('data.status', 'completed');
+    }
+
+    public function test_manual_is_correct_only_update_is_rejected_without_affecting_zero_or_automatic_grading(): void
+    {
+        $institution = $this->createInstitution('MANUAL-IS-CORRECT-ONLY');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse($institution, $teacher, 'manual-is-correct-only');
+        $this->createEnrollment($course, $student);
+
+        $quiz = Quiz::create([
+            'course_id' => $course->id,
+            'teacher_profile_id' => $teacher->id,
+            'title' => 'Manual and automatic grading quiz',
+            'total_marks' => 2,
+            'passing_marks' => 1,
+            'status' => 'published',
+        ]);
+        $manualQuestion = QuestionBank::create([
+            'course_id' => $course->id,
+            'question_text' => 'Explain the answer.',
+            'question_type' => 'short_answer',
+            'marks' => 1,
+            'status' => 'active',
+        ]);
+        $automaticQuestion = QuestionBank::create([
+            'course_id' => $course->id,
+            'question_text' => 'Select the correct option.',
+            'question_type' => 'mcq',
+            'marks' => 1,
+            'status' => 'active',
+        ]);
+
+        foreach ([$manualQuestion, $automaticQuestion] as $index => $question) {
+            QuizQuestion::create([
+                'quiz_id' => $quiz->id,
+                'question_bank_id' => $question->id,
+                'marks' => 1,
+                'sort_order' => $index + 1,
+            ]);
+        }
+
+        $correctOption = QuestionOption::create([
+            'question_bank_id' => $automaticQuestion->id,
+            'option_text' => 'Correct',
+            'is_correct' => true,
+            'sort_order' => 1,
+        ]);
+
+        $this->authenticate($studentUser);
+        $attemptId = $this->postJson('/api/quiz-attempts', [
+            'quiz_id' => $quiz->id,
+            'student_profile_id' => $student->id,
+        ])->assertCreated()->json('data.id');
+        $manualAnswerId = $this->postJson('/api/quiz-answers', [
+            'quiz_attempt_id' => $attemptId,
+            'question_bank_id' => $manualQuestion->id,
+            'answer_text' => 'Student response.',
+        ])->assertCreated()->json('data.id');
+        $automaticAnswerId = $this->postJson('/api/quiz-answers', [
+            'quiz_attempt_id' => $attemptId,
+            'question_bank_id' => $automaticQuestion->id,
+            'question_option_id' => $correctOption->id,
+        ])->assertCreated()->json('data.id');
+
+        $this->assertDatabaseHas('quiz_answers', [
+            'id' => $automaticAnswerId,
+            'is_correct' => true,
+            'marks_obtained' => 1,
+        ]);
+
+        $this->patchJson('/api/quiz-attempts/' . $attemptId, [
+            'status' => 'submitted',
+        ])->assertOk()
+            ->assertJsonPath('data.status', 'submitted')
+            ->assertJsonPath('data.result_status', 'pending');
+
+        $this->authenticate($teacherUser);
+        $this->patchJson('/api/quiz-answers/' . $manualAnswerId, [
+            'is_correct' => true,
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('marks_obtained')
+            ->assertJsonPath(
+                'errors.marks_obtained.0',
+                'Explicit marks are required to grade a manual answer.'
+            );
+        $this->patchJson('/api/quiz-answers/' . $manualAnswerId, [
+            'is_correct' => false,
+            'marks_obtained' => null,
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('marks_obtained');
+
+        $manualAnswer = QuizAnswer::findOrFail($manualAnswerId);
+        $this->assertFalse($manualAnswer->is_correct);
+        $this->assertSame('0.00', $manualAnswer->marks_obtained);
+        $this->assertNull($manualAnswer->manually_graded_at);
+
+        $attempt = QuizAttempt::findOrFail($attemptId);
+        $this->assertSame('submitted', $attempt->status);
+        $this->assertSame('pending', $attempt->result_status);
+        $this->assertNull($attempt->evaluated_at);
+
+        $this->patchJson('/api/quiz-answers/' . $manualAnswerId, [
+            'marks_obtained' => 0,
+        ])->assertOk()
+            ->assertJsonPath('data.marks_obtained', '0.00');
+
+        $manualAnswer->refresh();
+        $this->assertFalse($manualAnswer->is_correct);
+        $this->assertNotNull($manualAnswer->manually_graded_at);
+        $this->assertDatabaseHas('quiz_answers', [
+            'id' => $automaticAnswerId,
+            'is_correct' => true,
+            'marks_obtained' => 1,
+        ]);
+
+        $attempt->refresh();
+        $this->assertSame('evaluated', $attempt->status);
+        $this->assertSame('passed', $attempt->result_status);
+        $this->assertSame('1.00', $attempt->marks_obtained);
+        $this->assertNotNull($attempt->evaluated_at);
+    }
+
+    public function test_pending_manual_grading_redacts_student_answer_and_attempt_responses_for_both_result_settings(): void
+    {
+        foreach ([false, true] as $showResultImmediately) {
+            $suffix = $showResultImmediately ? 'IMMEDIATE' : 'DELAYED';
+            $fixture = $this->createQuizResultVisibilityFixture(
+                $suffix,
+                $showResultImmediately
+            );
+            $this->authenticate($fixture['student_user']);
+
+            $attemptCreateResponse = $this->postJson('/api/quiz-attempts', [
+                'quiz_id' => $fixture['quiz']->id,
+                'student_profile_id' => $fixture['student']->id,
+            ])->assertCreated()
+                ->assertJsonPath('data.status', 'in_progress');
+            $this->assertPendingQuizAttemptPayload($attemptCreateResponse->json('data'));
+            $attemptId = $attemptCreateResponse->json('data.id');
+
+            $attempt = QuizAttempt::findOrFail($attemptId);
+            $pendingAnswer = QuizAnswer::create([
+                'quiz_attempt_id' => $attempt->id,
+                'question_bank_id' => $fixture['manual_questions']['short_answer']->id,
+                'answer_text' => 'Manual response awaiting grading.',
+                'is_correct' => true,
+                'marks_obtained' => 4,
+            ]);
+            $attempt->update([
+                'marks_obtained' => 12,
+                'percentage' => 75,
+                'result_status' => 'passed',
+            ]);
+
+            $automaticAnswerResponse = $this->postJson('/api/quiz-answers', [
+                'quiz_attempt_id' => $attemptId,
+                'question_bank_id' => $fixture['automatic_question']->id,
+                'question_option_id' => $fixture['correct_option']->id,
+            ])->assertCreated();
+            $automaticAnswerId = $automaticAnswerResponse->json('data.id');
+            $this->assertPendingQuizAnswerPayload(
+                $automaticAnswerResponse->json('data')
+            );
+            $this->assertArrayNotHasKey(
+                'is_correct',
+                $automaticAnswerResponse->json('data.question_option')
+            );
+            foreach ($automaticAnswerResponse->json('data.question_bank.options') as $option) {
+                $this->assertArrayNotHasKey('is_correct', $option);
+            }
+
+            $manualAnswerResponse = $this->postJson('/api/quiz-answers', [
+                'quiz_attempt_id' => $attemptId,
+                'question_bank_id' => $fixture['manual_questions']['fill_blank']->id,
+                'answer_text' => 'Second manual response.',
+            ])->assertCreated();
+            $this->assertPendingQuizAnswerPayload(
+                $manualAnswerResponse->json('data')
+            );
+            $this->assertSame(
+                'Study guidance: organize evidence before answering.',
+                $manualAnswerResponse->json('data.question_bank.explanation')
+            );
+
+            $this->patchJson('/api/quiz-answers/' . $pendingAnswer->id, [
+                'answer_text' => 'Updated manual response.',
+            ])->assertOk()->assertJsonMissingPath(
+                'data.quiz_attempt.result_status'
+            );
+            $this->assertPendingQuizAnswerPayload(
+                $this->getJson('/api/quiz-answers/' . $pendingAnswer->id)
+                    ->assertOk()
+                    ->json('data')
+            );
+
+            $answerList = $this->getJson('/api/quiz-answers')
+                ->assertOk()
+                ->json('data.data');
+            $this->assertCount(3, $answerList);
+            foreach ($answerList as $answer) {
+                $this->assertPendingQuizAnswerPayload($answer);
+            }
+
+            $submissionResponse = $this->patchJson('/api/quiz-attempts/' . $attemptId, [
+                'status' => 'submitted',
+            ])->assertOk();
+            $this->assertPendingQuizAttemptPayload(
+                $submissionResponse->json('data')
+            );
+
+            $attemptDetail = $this->getJson('/api/quiz-attempts/' . $attemptId)
+                ->assertOk()
+                ->json('data');
+            $this->assertPendingQuizAttemptPayload($attemptDetail);
+            $attemptList = $this->getJson('/api/quiz-attempts')
+                ->assertOk()
+                ->json('data.data');
+            $this->assertCount(1, $attemptList);
+            $this->assertPendingQuizAttemptPayload($attemptList[0]);
+
+            $this->assertPendingQuizAnswerPayload(
+                $this->getJson('/api/quiz-answers/' . $automaticAnswerId)
+                    ->assertOk()
+                    ->json('data')
+            );
+            foreach (
+                $this->getJson('/api/quiz-answers')
+                    ->assertOk()
+                    ->json('data.data') as $answer
+            ) {
+                $this->assertPendingQuizAnswerPayload($answer);
+            }
+        }
+    }
+
+    public function test_students_cannot_see_in_progress_automatic_quiz_results_but_staff_can(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('IN-PROGRESS', false);
+        $this->authenticate($fixture['student_user']);
+
+        $attemptCreateResponse = $this->postJson('/api/quiz-attempts', [
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $fixture['student']->id,
+        ])->assertCreated();
+        $this->assertInProgressQuizAttemptResultsAreHidden(
+            $attemptCreateResponse->json('data')
+        );
+        $attemptId = $attemptCreateResponse->json('data.id');
+
+        $answerCreateResponse = $this->postJson('/api/quiz-answers', [
+            'quiz_attempt_id' => $attemptId,
+            'question_bank_id' => $fixture['automatic_question']->id,
+            'question_option_id' => $fixture['correct_option']->id,
+        ])->assertCreated();
+        $this->assertInProgressQuizAttemptResultsAreHidden(
+            $answerCreateResponse->json('data.quiz_attempt')
+        );
+        $answerId = $answerCreateResponse->json('data.id');
+
+        $attempt = QuizAttempt::findOrFail($attemptId);
+        $this->assertSame('in_progress', $attempt->status);
+        $this->assertSame('1.00', $attempt->marks_obtained);
+        $this->assertSame('6.25', $attempt->percentage);
+        $this->assertSame('failed', $attempt->result_status);
+
+        $attemptList = $this->getJson('/api/quiz-attempts')
+            ->assertOk()
+            ->json('data.data');
+        $this->assertCount(1, $attemptList);
+        $this->assertInProgressQuizAttemptResultsAreHidden($attemptList[0]);
+
+        $attemptDetail = $this->getJson('/api/quiz-attempts/' . $attemptId)
+            ->assertOk()
+            ->json('data');
+        $this->assertInProgressQuizAttemptResultsAreHidden($attemptDetail);
+
+        $answerDetail = $this->getJson('/api/quiz-answers/' . $answerId)
+            ->assertOk()
+            ->json('data');
+        $this->assertInProgressQuizAttemptResultsAreHidden(
+            $answerDetail['quiz_attempt']
+        );
+        $this->assertArrayNotHasKey('is_correct', $answerDetail);
+        $this->assertArrayNotHasKey('marks_obtained', $answerDetail);
+
+        $this->authenticate($fixture['teacher_user']);
+
+        $staffAttemptList = $this->getJson('/api/quiz-attempts')
+            ->assertOk()
+            ->json('data.data');
+        $this->assertCount(1, $staffAttemptList);
+        $this->assertSame('failed', $staffAttemptList[0]['result_status']);
+        $this->assertSame('1.00', $staffAttemptList[0]['marks_obtained']);
+        $this->assertSame('6.25', $staffAttemptList[0]['percentage']);
+
+        $this->getJson('/api/quiz-attempts/' . $attemptId)
+            ->assertOk()
+            ->assertJsonPath('data.status', 'in_progress')
+            ->assertJsonPath('data.result_status', 'failed')
+            ->assertJsonPath('data.marks_obtained', '1.00')
+            ->assertJsonPath('data.percentage', '6.25');
+        $this->getJson('/api/quiz-answers/' . $answerId)
+            ->assertOk()
+            ->assertJsonPath('data.is_correct', true)
+            ->assertJsonPath('data.marks_obtained', '1.00')
+            ->assertJsonPath('data.quiz_attempt.status', 'in_progress')
+            ->assertJsonPath('data.quiz_attempt.result_status', 'failed')
+            ->assertJsonPath('data.quiz_attempt.marks_obtained', '1.00')
+            ->assertJsonPath('data.quiz_attempt.percentage', '6.25');
+    }
+
+    public function test_legacy_evaluated_attempt_with_null_manual_marker_is_redacted_only_for_learners(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('LEGACY', false);
+        $attempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $fixture['student']->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinutes(10),
+            'submitted_at' => now()->subMinutes(5),
+            'evaluated_at' => now()->subMinutes(4),
+            'total_marks' => 16,
+            'marks_obtained' => 12,
+            'percentage' => 75,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+        $answer = QuizAnswer::create([
+            'quiz_attempt_id' => $attempt->id,
+            'question_bank_id' => $fixture['manual_questions']['long_answer']->id,
+            'answer_text' => 'Legacy response.',
+            'is_correct' => true,
+            'marks_obtained' => 5,
+            'manually_graded_at' => null,
+        ]);
+
+        $this->authenticate($fixture['student_user']);
+
+        $this->assertPendingQuizAttemptPayload(
+            $this->getJson('/api/quiz-attempts/' . $attempt->id)
+                ->assertOk()
+                ->json('data')
+        );
+        $legacyAttemptList = $this->getJson('/api/quiz-attempts')
+            ->assertOk()
+            ->json('data.data');
+        $this->assertCount(1, $legacyAttemptList);
+        $this->assertPendingQuizAttemptPayload($legacyAttemptList[0]);
+
+        $this->assertPendingQuizAnswerPayload(
+            $this->getJson('/api/quiz-answers/' . $answer->id)
+                ->assertOk()
+                ->json('data')
+        );
+        $legacyAnswerList = $this->getJson('/api/quiz-answers')
+            ->assertOk()
+            ->json('data.data');
+        $this->assertCount(1, $legacyAnswerList);
+        $this->assertPendingQuizAnswerPayload($legacyAnswerList[0]);
+
+        $this->authenticate($fixture['teacher_user']);
+        $this->getJson('/api/quiz-attempts/' . $attempt->id)
+            ->assertOk()
+            ->assertJsonPath('data.status', 'evaluated')
+            ->assertJsonPath('data.result_status', 'passed')
+            ->assertJsonPath('data.marks_obtained', '12.00')
+            ->assertJsonPath('data.percentage', '75.00')
+            ->assertJsonPath('data.evaluated_at', $attempt->evaluated_at->toISOString());
+        $this->getJson('/api/quiz-answers/' . $answer->id)
+            ->assertOk()
+            ->assertJsonPath('data.is_correct', true)
+            ->assertJsonPath('data.marks_obtained', '5.00')
+            ->assertJsonPath('data.manually_graded_at', null)
+            ->assertJsonPath('data.quiz_attempt.status', 'evaluated')
+            ->assertJsonPath('data.quiz_attempt.marks_obtained', '12.00');
+
+        $this->assertNull($answer->fresh()->manually_graded_at);
+    }
+
+    public function test_student_and_parent_dashboards_hide_pending_and_legacy_quiz_results(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('DASHBOARD', false);
+        $pendingAttempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $fixture['student']->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinutes(10),
+            'submitted_at' => now()->subMinutes(5),
+            'total_marks' => 16,
+            'marks_obtained' => 8,
+            'percentage' => 50,
+            'result_status' => 'passed',
+            'status' => 'submitted',
+        ]);
+        $legacyAttempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $fixture['student']->id,
+            'attempt_number' => 2,
+            'started_at' => now()->subMinutes(20),
+            'submitted_at' => now()->subMinutes(15),
+            'evaluated_at' => now()->subMinutes(14),
+            'total_marks' => 16,
+            'marks_obtained' => 12,
+            'percentage' => 75,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+        $pendingAnswer = QuizAnswer::create([
+            'quiz_attempt_id' => $pendingAttempt->id,
+            'question_bank_id' => $fixture['manual_questions']['short_answer']->id,
+            'answer_text' => 'Awaiting grading.',
+            'is_correct' => true,
+            'marks_obtained' => 4,
+        ]);
+        $legacyAnswer = QuizAnswer::create([
+            'quiz_attempt_id' => $legacyAttempt->id,
+            'question_bank_id' => $fixture['manual_questions']['long_answer']->id,
+            'answer_text' => 'Legacy answer awaiting marker.',
+            'is_correct' => true,
+            'marks_obtained' => 5,
+            'manually_graded_at' => null,
+        ]);
+        $parentUser = $this->createParent(
+            Institution::findOrFail($fixture['student']->institution_id),
+            $fixture['student']
+        );
+
+        $this->authenticate($fixture['student_user']);
+        $studentAttempts = $this->getJson('/api/student-dashboard/' . $fixture['student']->id)
+            ->assertOk()
+            ->json('data.quiz_attempts');
+        $this->assertCount(2, $studentAttempts);
+        foreach ($studentAttempts as $attempt) {
+            $this->assertPendingQuizAttemptPayload($attempt);
+        }
+
+        $this->authenticate($parentUser);
+        $parentDashboard = $this->getJson('/api/parent-dashboard/' . $fixture['student']->id)
+            ->assertOk()
+            ->json('data');
+        $this->assertCount(2, $parentDashboard['quiz_attempts']);
+        foreach ($parentDashboard['quiz_attempts'] as $attempt) {
+            $this->assertPendingQuizAttemptPayload($attempt);
+        }
+
+        $this->authenticate($fixture['teacher_user']);
+        $staffAttempts = $this->getJson('/api/student-dashboard/' . $fixture['student']->id)
+            ->assertOk()
+            ->json('data.quiz_attempts');
+        $staffLegacyAttempt = collect($staffAttempts)->firstWhere('id', $legacyAttempt->id);
+        $this->assertSame('evaluated', $staffLegacyAttempt['status']);
+        $this->assertSame('passed', $staffLegacyAttempt['result_status']);
+        $this->assertSame('12.00', $staffLegacyAttempt['marks_obtained']);
+        $this->assertSame('75.00', $staffLegacyAttempt['percentage']);
+
+        $this->assertDatabaseHas('quiz_attempts', [
+            'id' => $legacyAttempt->id,
+            'status' => 'evaluated',
+            'result_status' => 'passed',
+        ]);
+        $this->assertNull($pendingAnswer->fresh()->manually_graded_at);
+        $this->assertNull($legacyAnswer->fresh()->manually_graded_at);
+    }
+
+    public function test_student_and_parent_gradebooks_exclude_pending_attempts_and_mask_stored_totals(): void
+    {
+        $fixture = $this->createQuizResultVisibilityFixture('GRADEBOOK-PENDING', false);
+        $course = $fixture['quiz']->course;
+        $student = $fixture['student'];
+        $teacher = TeacherProfile::findOrFail($course->teacher_profile_id);
+
+        $legacyAttempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $student->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinutes(10),
+            'submitted_at' => now()->subMinutes(5),
+            'evaluated_at' => now()->subMinutes(4),
+            'total_marks' => 16,
+            'marks_obtained' => 8,
+            'percentage' => 50,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+        $pendingAnswer = QuizAnswer::create([
+            'quiz_attempt_id' => $legacyAttempt->id,
+            'question_bank_id' => $fixture['manual_questions']['fill_blank']->id,
+            'answer_text' => 'Legacy manual answer.',
+            'is_correct' => true,
+            'marks_obtained' => 5,
+            'manually_graded_at' => null,
+        ]);
+        $completedAttempt = QuizAttempt::create([
+            'quiz_id' => $fixture['quiz']->id,
+            'student_profile_id' => $student->id,
+            'attempt_number' => 2,
+            'started_at' => now()->subMinutes(3),
+            'submitted_at' => now()->subMinutes(2),
+            'evaluated_at' => now()->subMinute(),
+            'total_marks' => 16,
+            'marks_obtained' => 6,
+            'percentage' => 37.5,
+            'result_status' => 'failed',
+            'status' => 'evaluated',
+        ]);
+        QuizAnswer::create([
+            'quiz_attempt_id' => $completedAttempt->id,
+            'question_bank_id' => $fixture['automatic_question']->id,
+            'question_option_id' => $fixture['correct_option']->id,
+            'answer_text' => null,
+            'is_correct' => true,
+            'marks_obtained' => 6,
+        ]);
+
+        $assignment = $this->createAssignment($course, $teacher, 'Gradebook assignment');
+        $assignment->update(['maximum_marks' => 20]);
+        $submission = $this->createSubmission($assignment, $student);
+        AssignmentEvaluation::create([
+            'assignment_submission_id' => $submission->id,
+            'teacher_profile_id' => $teacher->id,
+            'marks_obtained' => 10,
+            'maximum_marks' => 20,
+            'result_status' => 'passed',
+            'evaluated_at' => now(),
+        ]);
+
+        $gradebook = Gradebook::create([
+            'course_id' => $course->id,
+            'student_profile_id' => $student->id,
+            'assignment_marks' => 10,
+            'quiz_marks' => 8,
+            'total_marks' => 18,
+            'maximum_marks' => 36,
+            'percentage' => 50,
+            'grade' => 'C',
+            'result_status' => 'passed',
+        ]);
+        $parentUser = $this->createParent(
+            Institution::findOrFail($student->institution_id),
+            $student
+        );
+
+        $this->authenticate($fixture['student_user']);
+        $studentGradebookList = $this->getJson('/api/gradebooks')
+            ->assertOk()
+            ->json('data.data');
+        $this->assertCount(1, $studentGradebookList);
+        $this->assertPendingGradebookPayload($studentGradebookList[0]);
+        $this->assertPendingGradebookPayload(
+            $this->getJson('/api/gradebooks/' . $gradebook->id)
+                ->assertOk()
+                ->json('data')
+        );
+
+        $this->authenticate($parentUser);
+        $parentDashboard = $this->getJson('/api/parent-dashboard/' . $student->id)
+            ->assertOk()
+            ->json('data');
+        $this->assertCount(1, $parentDashboard['gradebooks']);
+        $this->assertPendingGradebookPayload($parentDashboard['gradebooks'][0]);
+
+        $parentGrades = $this->getJson('/api/parent-dashboard/' . $student->id . '/grades')
+            ->assertOk()
+            ->json('data');
+        $this->assertNull($parentGrades['overall_percentage']);
+        $this->assertTrue($parentGrades['grading_pending']);
+        $this->assertPendingGradebookPayload($parentGrades['gradebooks'][0]);
+        $this->getJson('/api/gradebooks')
+            ->assertOk()
+            ->assertJsonPath('data.data.0.result_status', 'pending')
+            ->assertJsonMissingPath('data.data.0.quiz_marks');
+        $this->assertPendingGradebookPayload(
+            $this->getJson('/api/gradebooks/' . $gradebook->id)
+                ->assertOk()
+                ->json('data')
+        );
+
+        // Learner reads redact stale persisted totals without rewriting history.
+        $this->assertDatabaseHas('gradebooks', [
+            'id' => $gradebook->id,
+            'quiz_marks' => 8,
+            'total_marks' => 18,
+            'percentage' => 50,
+            'result_status' => 'passed',
+        ]);
+        $this->assertNull($pendingAnswer->fresh()->manually_graded_at);
+
+        // The existing authorized recalculation path refreshes the row from
+        // finalized attempts only and leaves it explicitly pending.
+        $this->authenticate($fixture['teacher_user']);
+        $this->getJson('/api/gradebooks/' . $gradebook->id)
+            ->assertOk()
+            ->assertJsonPath('data.quiz_marks', '8.00')
+            ->assertJsonPath('data.percentage', '50.00')
+            ->assertJsonPath('data.result_status', 'passed');
+        $this->postJson('/api/gradebooks/recalculate', [
+            'course_id' => $course->id,
+            'student_profile_id' => $student->id,
+        ])->assertOk()
+            ->assertJsonPath('data.assignment_marks', '10.00')
+            ->assertJsonPath('data.quiz_marks', '6.00')
+            ->assertJsonPath('data.total_marks', '16.00')
+            ->assertJsonPath('data.maximum_marks', '36.00')
+            ->assertJsonPath('data.percentage', '44.44')
+            ->assertJsonPath('data.result_status', 'pending');
+
+        $this->assertDatabaseHas('gradebooks', [
+            'id' => $gradebook->id,
+            'assignment_marks' => 10,
+            'quiz_marks' => 6,
+            'total_marks' => 16,
+            'maximum_marks' => 36,
+            'result_status' => 'pending',
+        ]);
+    }
+
     public function test_manual_quiz_attempt_stays_pending_until_every_manual_answer_is_graded(): void
     {
         $institution = $this->createInstitution('MANUAL-QUIZ-GRADING');
@@ -1180,6 +4148,9 @@ class ImmediateSecurityFixesTest extends TestCase
         $this->patchJson('/api/quiz-attempts/' . $attemptId, [
             'status' => 'submitted',
         ])->assertOk()->assertJsonPath('data.status', 'submitted');
+        $submittedAttempt = QuizAttempt::findOrFail($attemptId);
+        $this->assertNotNull($submittedAttempt->submitted_at);
+        $this->assertNull($submittedAttempt->evaluated_at);
 
         $this->authenticate($teacherUser);
         $this->patchJson('/api/quiz-answers/' . $shortAnswerId, [
@@ -1189,6 +4160,7 @@ class ImmediateSecurityFixesTest extends TestCase
         $attempt = QuizAttempt::findOrFail($attemptId);
         $this->assertSame('submitted', $attempt->status);
         $this->assertSame('pending', $attempt->result_status);
+        $this->assertNull($attempt->evaluated_at);
         $this->assertDatabaseHas('quiz_answers', [
             'id' => $shortAnswerId,
             'marks_obtained' => 2,
@@ -1211,6 +4183,7 @@ class ImmediateSecurityFixesTest extends TestCase
         $this->assertSame('passed', $attempt->result_status);
         $this->assertSame('4.00', $attempt->marks_obtained);
         $this->assertSame('40.00', $attempt->percentage);
+        $this->assertNotNull($attempt->evaluated_at);
         $this->assertNotNull(QuizAnswer::findOrFail($longAnswerId)->manually_graded_at);
 
         $this->authenticate($studentUser);
@@ -1876,6 +4849,15 @@ class ImmediateSecurityFixesTest extends TestCase
         ])->assertOk();
     }
 
+    private function failCertificateFilePathPersistence(): void
+    {
+        DB::statement(
+            "CREATE TRIGGER fail_certificate_file_path_update " .
+            "BEFORE UPDATE OF certificate_file ON certificates " .
+            "BEGIN SELECT RAISE(ABORT, 'simulated certificate path persistence failure'); END"
+        );
+    }
+
     private function createInstitution(string $code): Institution
     {
         return Institution::create([
@@ -2016,6 +4998,102 @@ class ImmediateSecurityFixesTest extends TestCase
             'final_grade' => 'B',
             'status' => 'issued',
             'verification_status' => 'valid',
+        ]);
+    }
+
+    private function createPassingGradebook(
+        Course $course,
+        StudentProfile $studentProfile
+    ): Gradebook {
+        return Gradebook::create([
+            'course_id' => $course->id,
+            'student_profile_id' => $studentProfile->id,
+            'assignment_marks' => 80,
+            'quiz_marks' => 75,
+            'total_marks' => 155,
+            'maximum_marks' => 200,
+            'percentage' => 77.5,
+            'grade' => 'B',
+            'result_status' => 'passed',
+        ]);
+    }
+
+    private function createPassingQuizAttempt(Quiz $quiz, StudentProfile $studentProfile): QuizAttempt
+    {
+        return QuizAttempt::create([
+            'quiz_id' => $quiz->id,
+            'student_profile_id' => $studentProfile->id,
+            'attempt_number' => 1,
+            'started_at' => now()->subMinutes(10),
+            'submitted_at' => now()->subMinutes(5),
+            'evaluated_at' => now()->subMinutes(4),
+            'total_marks' => 16,
+            'marks_obtained' => 12,
+            'percentage' => 75,
+            'result_status' => 'passed',
+            'status' => 'evaluated',
+        ]);
+    }
+
+    private function createCertificateSetting(Institution $institution): CertificateSetting
+    {
+        return CertificateSetting::create([
+            'institution_id' => $institution->id,
+            'certificate_title' => 'Certificate of Completion',
+            'authorized_person_name' => 'Academic Director',
+            'authorized_person_designation' => 'Director',
+            'secondary_signatory_name' => 'Registrar',
+            'secondary_signatory_designation' => 'Registrar',
+            'status' => 'active',
+        ]);
+    }
+
+    private function certificateSnapshot(Certificate $certificate): array
+    {
+        return [
+            'final_percentage' => (string) $certificate->final_percentage,
+            'final_grade' => $certificate->final_grade,
+            'issued_date' => $certificate->issued_date?->toDateString(),
+            'certificate_number' => $certificate->certificate_number,
+            'certificate_uuid' => $certificate->certificate_uuid,
+            'verification_token' => $certificate->verification_token,
+        ];
+    }
+
+    private function createCertificateReconciliationFixture(string $suffix): array
+    {
+        $fixture = $this->createQuizResultVisibilityFixture($suffix, false);
+        $attempt = $this->createPassingQuizAttempt(
+            $fixture['quiz'],
+            $fixture['student']
+        );
+        $gradebook = Gradebook::create([
+            'course_id' => $fixture['quiz']->course_id,
+            'student_profile_id' => $fixture['student']->id,
+            'assignment_marks' => 0,
+            'quiz_marks' => 12,
+            'total_marks' => 12,
+            'maximum_marks' => 16,
+            'percentage' => 75,
+            'grade' => 'B+',
+            'result_status' => 'passed',
+        ]);
+        $certificate = $this->createCertificate(
+            $fixture['quiz']->course,
+            $fixture['student'],
+            'CERT-' . strtoupper($suffix) . '-001'
+        );
+        $certificate->update([
+            'gradebook_id' => $gradebook->id,
+            'final_percentage' => 75,
+            'final_grade' => 'B+',
+        ]);
+
+        return array_merge($fixture, [
+            'attempt' => $attempt,
+            'certificate' => $certificate->fresh(),
+            'gradebook' => $gradebook,
+            'institution_id' => (int) $fixture['quiz']->course->institution_id,
         ]);
     }
 
@@ -2447,6 +5525,166 @@ class ImmediateSecurityFixesTest extends TestCase
         );
     }
 
+    public function test_assignment_creation_rejects_cross_course_relationships_and_keeps_null_relationships_optional(): void
+    {
+        $institution = $this->createInstitution('ASSIGNMENT-CREATE-RELATIONS');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        $sourceCourse = $this->createCourse($institution, $teacher, 'assignment-create-source');
+        $otherCourse = $this->createCourse($institution, $teacher, 'assignment-create-other');
+        $sourceSection = CourseSection::create([
+            'course_id' => $sourceCourse->id,
+            'title' => 'Source section',
+            'sort_order' => 1,
+            'status' => 'active',
+        ]);
+        $otherSection = CourseSection::create([
+            'course_id' => $otherCourse->id,
+            'title' => 'Other section',
+            'sort_order' => 1,
+            'status' => 'active',
+        ]);
+        $sourceLesson = $this->createLesson($sourceCourse, 'Source lesson');
+        $otherLesson = $this->createLesson($otherCourse, 'Other lesson');
+
+        $this->authenticate($teacherUser);
+
+        $this->postJson('/api/assignments', [
+            'course_id' => $sourceCourse->id,
+            'lesson_id' => $otherLesson->id,
+            'title' => 'Cross-course lesson assignment',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('lesson_id');
+
+        $this->postJson('/api/assignments', [
+            'course_id' => $sourceCourse->id,
+            'course_section_id' => $otherSection->id,
+            'title' => 'Cross-course section assignment',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('course_section_id');
+
+        $this->postJson('/api/assignments', [
+            'course_id' => $sourceCourse->id,
+            'course_section_id' => $sourceSection->id,
+            'lesson_id' => $sourceLesson->id,
+            'title' => 'Valid linked assignment',
+        ])->assertCreated()
+            ->assertJsonPath('data.course_section_id', $sourceSection->id)
+            ->assertJsonPath('data.lesson_id', $sourceLesson->id);
+
+        $this->postJson('/api/assignments', [
+            'course_id' => $sourceCourse->id,
+            'course_section_id' => null,
+            'lesson_id' => null,
+            'title' => 'Unlinked assignment',
+        ])->assertCreated()
+            ->assertJsonPath('data.course_section_id', null)
+            ->assertJsonPath('data.lesson_id', null);
+    }
+
+    public function test_assignment_updates_validate_effective_course_and_reject_invalid_changes_atomically(): void
+    {
+        $institution = $this->createInstitution('ASSIGNMENT-UPDATE-RELATIONS');
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        $sourceCourse = $this->createCourse($institution, $teacher, 'assignment-update-source');
+        $targetCourse = $this->createCourse($institution, $teacher, 'assignment-update-target');
+        $sourceSection = CourseSection::create([
+            'course_id' => $sourceCourse->id,
+            'title' => 'Source section',
+            'sort_order' => 1,
+            'status' => 'active',
+        ]);
+        $targetSection = CourseSection::create([
+            'course_id' => $targetCourse->id,
+            'title' => 'Target section',
+            'sort_order' => 1,
+            'status' => 'active',
+        ]);
+        $sourceLesson = $this->createLesson($sourceCourse, 'Source lesson');
+        $targetLesson = $this->createLesson($targetCourse, 'Target lesson');
+
+        $this->authenticate($teacherUser);
+        $assignmentId = $this->postJson('/api/assignments', [
+            'course_id' => $sourceCourse->id,
+            'course_section_id' => $sourceSection->id,
+            'lesson_id' => $sourceLesson->id,
+            'title' => 'Existing assignment',
+        ])->assertCreated()->json('data.id');
+
+        $this->patchJson('/api/assignments/' . $assignmentId, [
+            'title' => 'Valid partial update',
+        ])->assertOk()
+            ->assertJsonPath('data.course_section_id', $sourceSection->id)
+            ->assertJsonPath('data.lesson_id', $sourceLesson->id);
+
+        $this->patchJson('/api/assignments/' . $assignmentId, [
+            'title' => 'Must not persist after invalid lesson',
+            'lesson_id' => $targetLesson->id,
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('lesson_id');
+        $this->assertDatabaseHas('assignments', [
+            'id' => $assignmentId,
+            'course_id' => $sourceCourse->id,
+            'course_section_id' => $sourceSection->id,
+            'lesson_id' => $sourceLesson->id,
+            'title' => 'Valid partial update',
+        ]);
+
+        $this->patchJson('/api/assignments/' . $assignmentId, [
+            'title' => 'Must not persist after invalid section',
+            'course_section_id' => $targetSection->id,
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('course_section_id');
+        $this->assertDatabaseHas('assignments', [
+            'id' => $assignmentId,
+            'course_id' => $sourceCourse->id,
+            'course_section_id' => $sourceSection->id,
+            'lesson_id' => $sourceLesson->id,
+            'title' => 'Valid partial update',
+        ]);
+
+        $this->patchJson('/api/assignments/' . $assignmentId, [
+            'title' => 'Must not persist after course move',
+            'course_id' => $targetCourse->id,
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors(['course_section_id', 'lesson_id']);
+        $this->assertDatabaseHas('assignments', [
+            'id' => $assignmentId,
+            'course_id' => $sourceCourse->id,
+            'course_section_id' => $sourceSection->id,
+            'lesson_id' => $sourceLesson->id,
+            'title' => 'Valid partial update',
+        ]);
+
+        $this->patchJson('/api/assignments/' . $assignmentId, [
+            'course_id' => $targetCourse->id,
+            'lesson_id' => $targetLesson->id,
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('course_section_id');
+        $this->assertDatabaseHas('assignments', [
+            'id' => $assignmentId,
+            'course_id' => $sourceCourse->id,
+            'course_section_id' => $sourceSection->id,
+            'lesson_id' => $sourceLesson->id,
+            'title' => 'Valid partial update',
+        ]);
+
+        $this->patchJson('/api/assignments/' . $assignmentId, [
+            'course_id' => $targetCourse->id,
+            'course_section_id' => $targetSection->id,
+            'lesson_id' => $targetLesson->id,
+        ])->assertOk()
+            ->assertJsonPath('data.course_id', $targetCourse->id)
+            ->assertJsonPath('data.course_section_id', $targetSection->id)
+            ->assertJsonPath('data.lesson_id', $targetLesson->id);
+
+        $this->patchJson('/api/assignments/' . $assignmentId, [
+            'course_section_id' => null,
+            'lesson_id' => null,
+        ])->assertOk()
+            ->assertJsonPath('data.course_section_id', null)
+            ->assertJsonPath('data.lesson_id', null);
+    }
+
     public function test_institution_admin_assignment_access_is_tenant_scoped_and_super_admin_access_is_preserved(): void
     {
         $firstInstitution = $this->createInstitution('ASSIGNMENT-AUTH-A');
@@ -2645,5 +5883,172 @@ class ImmediateSecurityFixesTest extends TestCase
             'result_status' => 'passed',
             'evaluated_at' => now(),
         ]);
+    }
+
+    private function assertPendingCertificatePayload(array $certificate): void
+    {
+        $this->assertTrue($certificate['grading_pending']);
+        $this->assertSame('pending', $certificate['status']);
+        $this->assertSame('pending', $certificate['verification_status']);
+
+        foreach ([
+            'final_percentage',
+            'final_grade',
+            'certificate_file',
+            'certificate_file_url',
+        ] as $hiddenField) {
+            $this->assertArrayNotHasKey($hiddenField, $certificate);
+        }
+
+        if (isset($certificate['gradebook'])) {
+            $this->assertSame('pending', $certificate['gradebook']['result_status']);
+
+            foreach ([
+                'assignment_marks',
+                'quiz_marks',
+                'total_marks',
+                'maximum_marks',
+                'percentage',
+                'grade',
+            ] as $hiddenField) {
+                $this->assertArrayNotHasKey($hiddenField, $certificate['gradebook']);
+            }
+        }
+    }
+
+    private function createQuizResultVisibilityFixture(
+        string $suffix,
+        bool $showResultImmediately
+    ): array {
+        $institution = $this->createInstitution('QUIZ-VISIBILITY-' . $suffix);
+        [$teacherUser, $teacher] = $this->createTeacher($institution);
+        [$studentUser, $student] = $this->createStudent($institution);
+        $course = $this->createCourse(
+            $institution,
+            $teacher,
+            'quiz-result-visibility-' . strtolower($suffix)
+        );
+        $this->createEnrollment($course, $student);
+
+        $quiz = Quiz::create([
+            'course_id' => $course->id,
+            'teacher_profile_id' => $teacher->id,
+            'title' => 'Quiz result visibility ' . $suffix,
+            'total_marks' => 16,
+            'passing_marks' => 8,
+            'show_result_immediately' => $showResultImmediately,
+            'status' => 'published',
+        ]);
+
+        $manualQuestions = [];
+        foreach (['short_answer', 'long_answer', 'fill_blank'] as $index => $type) {
+            $question = QuestionBank::create([
+                'course_id' => $course->id,
+                'question_text' => 'Manual ' . str_replace('_', ' ', $type) . ' question.',
+                'question_type' => $type,
+                'marks' => 5,
+                'explanation' => 'Study guidance: organize evidence before answering.',
+                'status' => 'active',
+            ]);
+            $manualQuestions[$type] = $question;
+            QuizQuestion::create([
+                'quiz_id' => $quiz->id,
+                'question_bank_id' => $question->id,
+                'marks' => 5,
+                'sort_order' => $index + 1,
+            ]);
+        }
+
+        $automaticQuestion = QuestionBank::create([
+            'course_id' => $course->id,
+            'question_text' => 'Select the correct option.',
+            'question_type' => 'mcq',
+            'marks' => 1,
+            'explanation' => 'Study guidance for the automatic question.',
+            'status' => 'active',
+        ]);
+        QuizQuestion::create([
+            'quiz_id' => $quiz->id,
+            'question_bank_id' => $automaticQuestion->id,
+            'marks' => 1,
+            'sort_order' => 4,
+        ]);
+        $correctOption = QuestionOption::create([
+            'question_bank_id' => $automaticQuestion->id,
+            'option_text' => 'Correct option',
+            'is_correct' => true,
+            'sort_order' => 1,
+        ]);
+
+        return [
+            'teacher_user' => $teacherUser,
+            'student_user' => $studentUser,
+            'student' => $student,
+            'quiz' => $quiz,
+            'manual_questions' => $manualQuestions,
+            'automatic_question' => $automaticQuestion,
+            'correct_option' => $correctOption,
+        ];
+    }
+
+    private function assertPendingQuizAnswerPayload(array $answer): void
+    {
+        $this->assertArrayNotHasKey('is_correct', $answer);
+        $this->assertArrayNotHasKey('marks_obtained', $answer);
+        $this->assertArrayNotHasKey('manually_graded_at', $answer);
+
+        $attempt = $answer['quiz_attempt'];
+        $this->assertPendingQuizAttemptPayload($attempt);
+
+        if (isset($answer['question_option'])) {
+            $this->assertArrayNotHasKey('is_correct', $answer['question_option']);
+        }
+
+        foreach ($answer['question_bank']['options'] ?? [] as $option) {
+            $this->assertArrayNotHasKey('is_correct', $option);
+        }
+    }
+
+    private function assertPendingQuizAttemptPayload(array $attempt): void
+    {
+        $this->assertContains($attempt['status'], ['in_progress', 'submitted']);
+        $this->assertArrayNotHasKey('marks_obtained', $attempt);
+        $this->assertArrayNotHasKey('percentage', $attempt);
+        $this->assertArrayNotHasKey('evaluated_at', $attempt);
+        $this->assertArrayNotHasKey('has_pending_manual_answers', $attempt);
+
+        if ($attempt['status'] === 'in_progress') {
+            $this->assertArrayNotHasKey('result_status', $attempt);
+
+            return;
+        }
+
+        $this->assertSame('pending', $attempt['result_status']);
+    }
+
+    private function assertInProgressQuizAttemptResultsAreHidden(array $attempt): void
+    {
+        $this->assertSame('in_progress', $attempt['status']);
+
+        foreach ([
+            'marks_obtained',
+            'percentage',
+            'result_status',
+            'evaluated_at',
+        ] as $hiddenField) {
+            $this->assertArrayNotHasKey($hiddenField, $attempt);
+        }
+    }
+
+    private function assertPendingGradebookPayload(array $gradebook): void
+    {
+        $this->assertSame('pending', $gradebook['result_status']);
+        $this->assertArrayNotHasKey('assignment_marks', $gradebook);
+        $this->assertArrayNotHasKey('quiz_marks', $gradebook);
+        $this->assertArrayNotHasKey('total_marks', $gradebook);
+        $this->assertArrayNotHasKey('maximum_marks', $gradebook);
+        $this->assertArrayNotHasKey('percentage', $gradebook);
+        $this->assertArrayNotHasKey('grade', $gradebook);
+        $this->assertArrayNotHasKey('has_pending_manual_grading', $gradebook);
     }
 }

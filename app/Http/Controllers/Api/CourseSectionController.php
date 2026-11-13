@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\AssessmentLockSetChanged;
 use App\Models\CourseSection;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -13,11 +14,20 @@ use App\Models\User;
 use Illuminate\Support\Facades\Auth;
 use App\Http\Requests\StoreCourseSectionRequest;
 use App\Http\Requests\UpdateCourseSectionRequest;
+use App\Services\CourseAssessmentLockService;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class CourseSectionController extends BaseApiController
 {
+    public function __construct(
+        private readonly CourseAssessmentLockService $courseAssessmentLockService
+    ) {
+    }
+
     private function authorizeCourseSectionAccess(
-        CourseSection $courseSection
+        CourseSection $courseSection,
+        ?Course $course = null
     ): void {
 
         /** @var User $user */
@@ -27,7 +37,7 @@ class CourseSectionController extends BaseApiController
             return;
         }
 
-        $courseSection->loadMissing('course');
+        $course ??= $courseSection->course;
 
         if ($user->hasRole('institution-admin')) {
 
@@ -38,7 +48,7 @@ class CourseSectionController extends BaseApiController
 
             if (
                 !$institutionUser ||
-                (int) $courseSection->course->institution_id !==
+                (int) $course->institution_id !==
                 (int) $institutionUser->institution_id
             ) {
                 abort(403, 'Unauthorized institution access.');
@@ -56,7 +66,7 @@ class CourseSectionController extends BaseApiController
 
             if (
                 !$teacherProfile ||
-                (int) $courseSection->course->teacher_profile_id !==
+                (int) $course->teacher_profile_id !==
                 (int) $teacherProfile->id
             ) {
                 abort(403, 'Unauthorized course section.');
@@ -194,32 +204,16 @@ class CourseSectionController extends BaseApiController
     */
         $validated = $request->validated();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Load Course
-    |--------------------------------------------------------------------------
-    */
-        $course = Course::findOrFail(
-            $validated['course_id']
-        );
+        $courseSection = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use ($validated): CourseSection {
+                $courseId = (int) $validated['course_id'];
+                $lockedCourses = $this->lockActiveCourses([$courseId]);
+                $course = $lockedCourses[$courseId];
 
-        /*
-    |--------------------------------------------------------------------------
-    | Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeCourseSectionManagement(
-            $course
-        );
+                $this->authorizeCourseSectionManagement($course);
 
-        /*
-    |--------------------------------------------------------------------------
-    | Create
-    |--------------------------------------------------------------------------
-    */
-        $courseSection = CourseSection::create(
-            $validated
-        );
+                return CourseSection::create($validated)->load('course');
+            });
 
         return $this->successResponse(
             $courseSection->load([
@@ -255,54 +249,77 @@ class CourseSectionController extends BaseApiController
         UpdateCourseSectionRequest $request,
         CourseSection $courseSection
     ): JsonResponse {
-
-        /*
-    |--------------------------------------------------------------------------
-    | Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeCourseSectionAccess(
-            $courseSection
-        );
-
-        /*
-    |--------------------------------------------------------------------------
-    | Validation
-    |--------------------------------------------------------------------------
-    */
         $validated = $request->validated();
+        $courseSectionId = (int) $courseSection->getKey();
+        $requestedCourseId = isset($validated['course_id'])
+            ? (int) $validated['course_id']
+            : null;
 
-        /*
-    |--------------------------------------------------------------------------
-    | Course Change Authorization
-    |--------------------------------------------------------------------------
-    */
-        if (isset($validated['course_id'])) {
+        $updatedSection = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use (
+                $courseSectionId,
+                $requestedCourseId,
+                $validated
+            ): CourseSection {
+                // This read only discovers the lock set. The section is reread
+                // under lock after all discovered course locks are held.
+                $discoveredCourseId = $this->discoverActiveSectionCourseId(
+                    $courseSectionId
+                );
+                $targetCourseId = $requestedCourseId ?? $discoveredCourseId;
+                $lockedCourses = $this->lockActiveCourses([
+                    $discoveredCourseId,
+                    $targetCourseId,
+                ]);
 
-            $course = Course::findOrFail(
-                $validated['course_id']
-            );
+                $lockedSection = $this->courseAssessmentLockService
+                    ->lockCourseSection($courseSectionId, withTrashed: false);
+                $currentCourseId = (int) $lockedSection->course_id;
 
-            $this->authorizeCourseSectionManagement(
-                $course
-            );
-        }
+                if ($currentCourseId !== $discoveredCourseId) {
+                    throw new AssessmentLockSetChanged([
+                        $discoveredCourseId,
+                        $targetCourseId,
+                        $currentCourseId,
+                    ]);
+                }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Update
-    |--------------------------------------------------------------------------
-    */
-        $courseSection->update(
-            $validated
-        );
+                $currentCourse = $lockedCourses[$currentCourseId] ?? null;
+                $targetCourse = $lockedCourses[$targetCourseId] ?? null;
+
+                if (!$currentCourse || !$targetCourse) {
+                    throw new AssessmentLockSetChanged([
+                        $discoveredCourseId,
+                        $targetCourseId,
+                        $currentCourseId,
+                    ]);
+                }
+
+                $this->authorizeCourseSectionAccess(
+                    $lockedSection,
+                    $currentCourse
+                );
+
+                if ($requestedCourseId !== null) {
+                    $this->authorizeCourseSectionManagement($targetCourse);
+                }
+
+                if (
+                    $targetCourseId !== $currentCourseId &&
+                    $this->sectionHasDependentRecords($courseSectionId)
+                ) {
+                    throw ValidationException::withMessages([
+                        'course_id' => 'A course section with lessons, assignments, quizzes, or live classes cannot be moved to another course.',
+                    ]);
+                }
+
+                $lockedSection->update($validated);
+
+                return $lockedSection->fresh()->load('course');
+            });
 
         return $this->successResponse(
-            $courseSection
-                ->fresh()
-                ->load([
-                    'course',
-                ]),
+            $updatedSection,
             'Course section updated successfully.'
         );
     }
@@ -310,41 +327,115 @@ class CourseSectionController extends BaseApiController
     public function destroy(
         CourseSection $courseSection
     ): JsonResponse {
+        $courseSectionId = (int) $courseSection->getKey();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeCourseSectionAccess(
-            $courseSection
-        );
+        $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use ($courseSectionId): void {
+                $discoveredCourseId = $this->discoverActiveSectionCourseId(
+                    $courseSectionId
+                );
+                $lockedCourses = $this->lockActiveCourses([$discoveredCourseId]);
+                $lockedSection = $this->courseAssessmentLockService
+                    ->lockCourseSection($courseSectionId, withTrashed: false);
+                $currentCourseId = (int) $lockedSection->course_id;
 
-        /*
-    |--------------------------------------------------------------------------
-    | Prevent Delete When Lessons Exist
-    |--------------------------------------------------------------------------
-    */
-        if (
-            $courseSection->lessons()->exists()
-        ) {
+                if ($currentCourseId !== $discoveredCourseId) {
+                    throw new AssessmentLockSetChanged([
+                        $discoveredCourseId,
+                        $currentCourseId,
+                    ]);
+                }
 
-            abort(
-                422,
-                'Course section cannot be deleted because it contains lessons.'
-            );
-        }
+                $currentCourse = $lockedCourses[$currentCourseId] ?? null;
 
-        /*
-    |--------------------------------------------------------------------------
-    | Soft Delete
-    |--------------------------------------------------------------------------
-    */
-        $courseSection->delete();
+                if (!$currentCourse) {
+                    throw new AssessmentLockSetChanged([
+                        $discoveredCourseId,
+                        $currentCourseId,
+                    ]);
+                }
+
+                $this->authorizeCourseSectionAccess(
+                    $lockedSection,
+                    $currentCourse
+                );
+
+                if ($this->sectionHasDependentRecords($courseSectionId)) {
+                    abort(
+                        422,
+                        'Course section cannot be deleted because it has lessons, assignments, quizzes, or live classes.'
+                    );
+                }
+
+                // Preserve soft-delete behavior and all related records.
+                $lockedSection->delete();
+            });
 
         return $this->successResponse(
             null,
             'Course section deleted successfully.'
         );
+    }
+
+    /** @return array<int, Course> */
+    private function lockActiveCourses(array $courseIds): array
+    {
+        $courseIds = array_values(array_unique(array_map('intval', $courseIds)));
+        sort($courseIds, SORT_NUMERIC);
+
+        $this->courseAssessmentLockService->lockCourses($courseIds);
+
+        // lockCourses includes soft-deleted rows in its lock set. Re-read with
+        // the normal active scope so those parents remain ineligible here.
+        $courses = Course::query()
+            ->whereIn('id', $courseIds)
+            ->get()
+            ->keyBy(static fn (Course $course): int => (int) $course->getKey());
+
+        foreach ($courseIds as $courseId) {
+            if (!$courses->has($courseId)) {
+                abort(404, 'Course not found.');
+            }
+        }
+
+        return $courses->all();
+    }
+
+    private function discoverActiveSectionCourseId(int $courseSectionId): int
+    {
+        $courseId = DB::table('course_sections')
+            ->where('id', $courseSectionId)
+            ->whereNull('deleted_at')
+            ->value('course_id');
+
+        if ($courseId === null) {
+            abort(404, 'Course section not found.');
+        }
+
+        return (int) $courseId;
+    }
+
+    /**
+     * Direct section references retain their foreign keys after soft delete,
+     * so query the tables directly instead of using soft-delete scopes.
+     */
+    private function sectionHasDependentRecords(int $courseSectionId): bool
+    {
+        foreach ([
+            'lessons',
+            'assignments',
+            'quizzes',
+            'live_classes',
+        ] as $table) {
+            if (
+                DB::table($table)
+                    ->where('course_section_id', $courseSectionId)
+                    ->exists()
+            ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

@@ -2,14 +2,12 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\AssessmentLockSetChanged;
 use App\Http\Controllers\Controller;
-use App\Models\AssignmentEvaluation;
 use App\Models\Course;
 use App\Models\CourseEnrollment;
 use App\Models\Gradebook;
 use App\Models\InstitutionUser;
-use App\Models\ParentProfile;
-use App\Models\QuizAttempt;
 use App\Models\StudentProfile;
 use App\Models\TeacherProfile;
 use App\Models\User;
@@ -17,13 +15,26 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use App\Http\Requests\StoreGradebookRequest;
 use App\Http\Requests\UpdateGradebookRequest;
 use App\Http\Requests\RecalculateGradebookRequest;
+use App\Services\QuizAttemptGradingService;
+use App\Services\GradebookCalculationService;
+use App\Services\ParentStudentAccessService;
+use App\Services\CourseAssessmentLockService;
 
 class GradebookController extends Controller
 {
+    public function __construct(
+        private QuizAttemptGradingService $quizAttemptGradingService,
+        private GradebookCalculationService $gradebookCalculationService,
+        private ParentStudentAccessService $parentStudentAccessService,
+        private CourseAssessmentLockService $courseAssessmentLockService
+    ) {
+    }
+
     private const GRADEBOOK_RELATIONS = [
         'course',
         'studentProfile.user',
@@ -49,9 +60,23 @@ class GradebookController extends Controller
         */
         $this->scopeGradebookQuery($gradebooks, $user);
 
+        if ($this->isLearnerGradebookViewer($user)) {
+            $this->quizAttemptGradingService
+                ->withPendingManualGradingFlag($gradebooks);
+        }
+
+        $paginator = $gradebooks->latest()->paginate(20);
+
+        if ($this->isLearnerGradebookViewer($user)) {
+            $paginator->getCollection()->each(function (Gradebook $gradebook) {
+                $this->quizAttemptGradingService
+                    ->redactPendingGradebookResults($gradebook);
+            });
+        }
+
         return response()->json([
             'message' => 'Gradebook records fetched successfully.',
-            'data' => $gradebooks->latest()->paginate(20),
+            'data' => $paginator,
         ]);
     }
 
@@ -78,8 +103,16 @@ class GradebookController extends Controller
 
     public function show(Gradebook $gradebook): JsonResponse
     {
+        /** @var User $user */
+        $user = Auth::user();
+
         // AUTHORIZATION
-        $this->authorizeGradebookAccess($gradebook);
+        $this->authorizeGradebookAccess($gradebook, $user);
+
+        if ($this->isLearnerGradebookViewer($user)) {
+            $this->quizAttemptGradingService
+                ->redactPendingGradebookResults($gradebook);
+        }
 
         return response()->json([
             'message' => 'Gradebook record fetched successfully.',
@@ -92,9 +125,6 @@ class GradebookController extends Controller
         /** @var User $user */
         $user = Auth::user();
 
-        // AUTHORIZATION: Only authorized staff can update gradebooks
-        $this->authorizeGradebookManagement($gradebook, $user);
-
         $validated = $request->validated();
 
         /*
@@ -102,13 +132,11 @@ class GradebookController extends Controller
         | Grade Tampering Protection
         |--------------------------------------------------------------------------
         */
-        if (! $user->hasRole('super-admin')) {
-            if ($validated !== []) {
-                throw ValidationException::withMessages([
-                    'gradebook' => 'Gradebook marks are calculated from assignment evaluations and quiz attempts.',
-                ]);
-            }
-
+        if (! $user->hasRole('super-admin') && $validated === []) {
+            // Preserve the existing non-super-admin recalculation path. It
+            // authorizes the gradebook before recalculating under the shared
+            // course/student/enrollment locks.
+            $this->authorizeGradebookManagement($gradebook, $user);
             $gradebook = $this->calculateGradebook(
                 (int) $gradebook->course_id,
                 (int) $gradebook->student_profile_id
@@ -120,48 +148,225 @@ class GradebookController extends Controller
             ]);
         }
 
-        $assignmentMarks = $validated['assignment_marks'] ?? $gradebook->assignment_marks;
-        $quizMarks = $validated['quiz_marks'] ?? $gradebook->quiz_marks;
-        $maximumMarks = $validated['maximum_marks'] ?? $gradebook->maximum_marks;
+        $gradebookId = (int) $gradebook->getKey();
 
-        $totalMarks = $assignmentMarks + $quizMarks;
+        $updatedGradebook = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use (
+                $gradebookId,
+                $validated,
+                $user
+            ): Gradebook {
+                $identity = $this->discoverActiveGradebookIdentity($gradebookId);
+                $courseId = (int) $identity->course_id;
+                $studentProfileId = (int) $identity->student_profile_id;
 
-        if ($totalMarks > $maximumMarks) {
-            throw ValidationException::withMessages([
-                'maximum_marks' => 'Maximum marks cannot be less than total marks.',
-            ]);
-        }
+                $course = $this->courseAssessmentLockService
+                    ->lockCourse($courseId, withTrashed: true);
+                $studentProfile = $this->courseAssessmentLockService
+                    ->lockStudent($studentProfileId);
+                $enrollment = $this->courseAssessmentLockService
+                    ->lockCourseEnrollments([[
+                        'course_id' => $courseId,
+                        'student_profile_id' => $studentProfileId,
+                    ]])->first();
+                $lockedGradebook = $this->courseAssessmentLockService
+                    ->lockGradebooks([$gradebookId])
+                    ->first();
 
-        $percentage = $maximumMarks > 0
-            ? round(($totalMarks / $maximumMarks) * 100, 2)
-            : 0;
+                if (! $lockedGradebook || $lockedGradebook->trashed()) {
+                    abort(404, 'Gradebook record not found.');
+                }
 
-        $gradebook->update([
-            'assignment_marks' => $assignmentMarks,
-            'quiz_marks' => $quizMarks,
-            'total_marks' => $totalMarks,
-            'maximum_marks' => $maximumMarks,
-            'percentage' => $percentage,
-            'grade' => $this->calculateGrade($percentage),
-            'result_status' => $percentage >= 40 ? 'passed' : 'failed',
-        ]);
+                if (
+                    (int) $lockedGradebook->course_id !== $courseId ||
+                    (int) $lockedGradebook->student_profile_id !== $studentProfileId
+                ) {
+                    throw new AssessmentLockSetChanged(
+                        [$courseId, (int) $lockedGradebook->course_id],
+                        [$studentProfileId, (int) $lockedGradebook->student_profile_id]
+                    );
+                }
+
+                $lockedGradebook->setRelation(
+                    'course',
+                    $course->trashed() ? null : $course
+                );
+                $lockedGradebook->setRelation('studentProfile', $studentProfile);
+                $this->authorizeLockedGradebookManagement(
+                    $lockedGradebook,
+                    $user,
+                    $enrollment
+                );
+
+                if (! $user->hasRole('super-admin')) {
+                    throw ValidationException::withMessages([
+                        'gradebook' => 'Gradebook marks are calculated from assignment evaluations and quiz attempts.',
+                    ]);
+                }
+
+                $assignmentMarks = $validated['assignment_marks'] ?? $lockedGradebook->assignment_marks;
+                $quizMarks = $validated['quiz_marks'] ?? $lockedGradebook->quiz_marks;
+                $maximumMarks = $validated['maximum_marks'] ?? $lockedGradebook->maximum_marks;
+
+                $totalMarks = $assignmentMarks + $quizMarks;
+
+                if ($totalMarks > $maximumMarks) {
+                    throw ValidationException::withMessages([
+                        'maximum_marks' => 'Maximum marks cannot be less than total marks.',
+                    ]);
+                }
+
+                $percentage = $this->gradebookCalculationService->percentageForMarks(
+                    (float) $totalMarks,
+                    (float) $maximumMarks
+                );
+
+                $lockedGradebook->update([
+                    'assignment_marks' => $assignmentMarks,
+                    'quiz_marks' => $quizMarks,
+                    'total_marks' => $totalMarks,
+                    'maximum_marks' => $maximumMarks,
+                    'percentage' => $percentage,
+                    'grade' => $this->gradebookCalculationService
+                        ->gradeForPercentage((float) $percentage),
+                    'result_status' => $this->gradebookCalculationService
+                        ->resultStatusForPercentage((float) $percentage),
+                ]);
+
+                return $lockedGradebook->fresh()->load(self::GRADEBOOK_RELATIONS);
+            });
 
         return response()->json([
             'message' => 'Gradebook record updated successfully.',
-            'data' => $gradebook->fresh()->load(self::GRADEBOOK_RELATIONS),
+            'data' => $updatedGradebook,
         ]);
     }
 
     public function destroy(Gradebook $gradebook): JsonResponse
     {
-        // AUTHORIZATION: Only authorized staff can delete gradebooks
-        $this->authorizeGradebookManagement($gradebook);
+        $gradebookId = (int) $gradebook->getKey();
 
-        $gradebook->delete();
+        $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use ($gradebookId): void {
+                $identity = $this->discoverActiveGradebookIdentity($gradebookId);
+                $courseId = (int) $identity->course_id;
+                $studentProfileId = (int) $identity->student_profile_id;
+
+                $course = $this->courseAssessmentLockService
+                    ->lockCourse($courseId, withTrashed: true);
+                $studentProfile = $this->courseAssessmentLockService
+                    ->lockStudent($studentProfileId);
+                $enrollment = $this->courseAssessmentLockService
+                    ->lockCourseEnrollments([[
+                        'course_id' => $courseId,
+                        'student_profile_id' => $studentProfileId,
+                    ]])->first();
+                $lockedGradebook = $this->courseAssessmentLockService
+                    ->lockGradebooks([$gradebookId])
+                    ->first();
+
+                if (! $lockedGradebook || $lockedGradebook->trashed()) {
+                    abort(404, 'Gradebook record not found.');
+                }
+
+                if (
+                    (int) $lockedGradebook->course_id !== $courseId ||
+                    (int) $lockedGradebook->student_profile_id !== $studentProfileId
+                ) {
+                    throw new AssessmentLockSetChanged(
+                        [$courseId, (int) $lockedGradebook->course_id],
+                        [$studentProfileId, (int) $lockedGradebook->student_profile_id]
+                    );
+                }
+
+                $lockedGradebook->setRelation(
+                    'course',
+                    $course->trashed() ? null : $course
+                );
+                $lockedGradebook->setRelation('studentProfile', $studentProfile);
+                $this->authorizeLockedGradebookManagement(
+                    $lockedGradebook,
+                    Auth::user(),
+                    $enrollment
+                );
+
+                $lockedGradebook->delete();
+            });
 
         return response()->json([
             'message' => 'Gradebook record deleted successfully.',
         ]);
+    }
+
+    private function discoverActiveGradebookIdentity(int $gradebookId): object
+    {
+        $identity = DB::table('gradebooks')
+            ->where('id', $gradebookId)
+            ->whereNull('deleted_at')
+            ->first(['course_id', 'student_profile_id']);
+
+        if (! $identity) {
+            abort(404, 'Gradebook record not found.');
+        }
+
+        return $identity;
+    }
+
+    /**
+     * Reauthorize management against the course, student, and enrollment
+     * rows locked by the current transaction.
+     */
+    private function authorizeLockedGradebookManagement(
+        Gradebook $gradebook,
+        User $user,
+        ?CourseEnrollment $enrollment
+    ): void {
+        if (! $user->hasAnyRole([
+            'super-admin',
+            'institution-admin',
+            'teacher',
+        ])) {
+            abort(403, 'Unauthorized: You do not have permission to manage this gradebook.');
+        }
+
+        if ($user->hasRole('super-admin')) {
+            return;
+        }
+
+        if (! $gradebook->hasConsistentInstitutions()) {
+            abort(403, 'Course and student must belong to the same institution.');
+        }
+
+        if ($user->hasRole('institution-admin')) {
+            $institutionUser = $this->institutionUserFor($user);
+
+            if ($this->institutionCanAccessGradebook($gradebook, $institutionUser)) {
+                return;
+            }
+
+            abort(403, 'Unauthorized: Gradebook does not belong to your institution.');
+        }
+
+        if ($user->hasRole('teacher')) {
+            $teacherProfile = $this->teacherProfileFor($user);
+            $enrollmentIsEligible = $enrollment &&
+                ! $enrollment->trashed() &&
+                (int) $enrollment->course_id === (int) $gradebook->course_id &&
+                (int) $enrollment->student_profile_id === (int) $gradebook->student_profile_id &&
+                in_array($enrollment->status, self::VALID_ENROLLMENT_STATUSES, true);
+
+            if (
+                $gradebook->course &&
+                (int) $gradebook->course->teacher_profile_id === (int) $teacherProfile->id &&
+                $enrollmentIsEligible
+            ) {
+                return;
+            }
+
+            abort(403, 'Unauthorized: This gradebook does not belong to your course enrollment.');
+        }
+
+        abort(403, 'Unauthorized.');
     }
 
     public function recalculate(RecalculateGradebookRequest $request): JsonResponse
@@ -187,77 +392,17 @@ class GradebookController extends Controller
 
     private function calculateGradebook(int $courseId, int $studentProfileId): Gradebook
     {
-        $course = Course::findOrFail($courseId);
-        $student = StudentProfile::findOrFail($studentProfileId);
-
-        if ((int) $course->institution_id !== (int) $student->institution_id) {
-            throw ValidationException::withMessages([
-                'student_profile_id' => 'Student and Course must belong to the same institution.',
-            ]);
-        }
-
-        $this->ensureStudentEnrolledInCourse($courseId, $studentProfileId);
-
-        $assignmentEvaluations = AssignmentEvaluation::whereHas(
-            'assignmentSubmission',
-            function ($query) use ($courseId, $studentProfileId) {
-                $query->where('student_profile_id', $studentProfileId)
-                    ->whereHas('assignment', function ($assignmentQuery) use ($courseId) {
-                        $assignmentQuery->where('course_id', $courseId);
-                    });
-            }
-        )->get();
-
-        $assignmentMarks = $assignmentEvaluations->sum('marks_obtained');
-        $assignmentMaximumMarks = $assignmentEvaluations->sum('maximum_marks');
-
-        $quizAttempts = QuizAttempt::where('student_profile_id', $studentProfileId)
-            ->where('status', 'evaluated')
-            ->whereHas('quiz', function ($query) use ($courseId) {
-                $query->where('course_id', $courseId);
-            })
-            ->get();
-
-        $quizMarks = $quizAttempts->sum('marks_obtained');
-        $quizMaximumMarks = $quizAttempts->sum('total_marks');
-
-        $totalMarks = $assignmentMarks + $quizMarks;
-        $maximumMarks = $assignmentMaximumMarks + $quizMaximumMarks;
-
-        $percentage = $maximumMarks > 0
-            ? round(($totalMarks / $maximumMarks) * 100, 2)
-            : 0;
-
-        return Gradebook::updateOrCreate(
-            [
-                'course_id' => $courseId,
-                'student_profile_id' => $studentProfileId,
-            ],
-            [
-                'assignment_marks' => $assignmentMarks,
-                'quiz_marks' => $quizMarks,
-                'total_marks' => $totalMarks,
-                'maximum_marks' => $maximumMarks,
-                'percentage' => $percentage,
-                'grade' => $this->calculateGrade($percentage),
-                'result_status' => $maximumMarks > 0
-                    ? ($percentage >= 40 ? 'passed' : 'failed')
-                    : 'pending',
-            ]
-        );
+        return $this->gradebookCalculationService->recalculate($courseId, $studentProfileId);
     }
 
-    private function calculateGrade(float $percentage): string
+    private function isLearnerGradebookViewer(User $user): bool
     {
-        return match (true) {
-            $percentage >= 90 => 'A+',
-            $percentage >= 80 => 'A',
-            $percentage >= 70 => 'B+',
-            $percentage >= 60 => 'B',
-            $percentage >= 50 => 'C',
-            $percentage >= 40 => 'D',
-            default => 'F',
-        };
+        return $user->hasAnyRole(['student', 'parent']) &&
+            ! $user->hasAnyRole([
+                'super-admin',
+                'institution-admin',
+                'teacher',
+            ]);
     }
 
     /**
@@ -312,12 +457,11 @@ class GradebookController extends Controller
         }
 
         if ($user->hasRole('parent')) {
-            $studentProfileIds = ParentProfile::where('user_id', $user->id)
-                ->where('status', 'active')
-                ->whereNotNull('student_profile_id')
-                ->pluck('student_profile_id');
-
-            $gradebooks->whereIn('student_profile_id', $studentProfileIds);
+            $this->parentStudentAccessService->scopeStudentRecords(
+                $gradebooks,
+                $user,
+                'gradebooks.student_profile_id'
+            );
 
             return;
         }
@@ -376,16 +520,13 @@ class GradebookController extends Controller
         }
 
         if ($user->hasRole('parent')) {
-            $hasActiveParentLink = ParentProfile::where('user_id', $user->id)
-                ->where('status', 'active')
-                ->where('student_profile_id', $gradebook->student_profile_id)
-                ->exists();
+            $this->parentStudentAccessService->authorizeStudent(
+                $user,
+                (int) $gradebook->student_profile_id,
+                'Unauthorized: You can only view your child\'s gradebook.'
+            );
 
-            if ($hasActiveParentLink) {
-                return;
-            }
-
-            abort(403, 'Unauthorized: You can only view your child\'s gradebook.');
+            return;
         }
 
         abort(403, 'Unauthorized.');

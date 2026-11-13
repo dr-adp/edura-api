@@ -4,6 +4,7 @@ namespace App\Policies;
 
 use App\Models\Course;
 use App\Models\InstitutionUser;
+use App\Models\TeacherProfile;
 use App\Models\User;
 
 class CoursePolicy
@@ -31,8 +32,10 @@ class CoursePolicy
         }
 
         if ($user->hasRole('teacher')) {
-            return $user->teacherProfile
-                && (int) $user->teacherProfile->id === (int) $course->teacher_profile_id;
+            $teacherProfile = TeacherProfile::where('user_id', $user->id)->first();
+
+            return $teacherProfile
+                && (int) $teacherProfile->id === (int) $course->teacher_profile_id;
         }
 
         return false;

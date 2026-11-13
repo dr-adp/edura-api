@@ -16,7 +16,8 @@ class UpdateAssignmentEvaluationRequest extends FormRequest
     public function rules(): array
     {
         /** @var AssignmentEvaluation $assignmentEvaluation */
-        $assignmentEvaluation = $this->route('assignmentEvaluation');
+        $assignmentEvaluation = $this->route('assignmentEvaluation')
+            ?? $this->route('assignment_evaluation');
 
         return [
             'assignment_submission_id' => [

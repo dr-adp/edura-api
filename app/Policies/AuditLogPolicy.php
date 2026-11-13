@@ -25,12 +25,8 @@ class AuditLogPolicy
             return true;
         }
 
-        $institutionUser = $this->activeInstitutionUser($user);
-
-        return $institutionUser
-            && $activityLog->institution_id !== null
-            && (int) $institutionUser->institution_id ===
-            (int) $activityLog->institution_id;
+        return $activityLog->institution_id !== null &&
+            $this->hasActiveMembershipIn($user, (int) $activityLog->institution_id);
     }
 
     private function canViewAuditLogs(User $user): bool
@@ -43,18 +39,27 @@ class AuditLogPolicy
             return false;
         }
 
-        if (! $this->activeInstitutionUser($user)) {
+        if (! $this->hasActiveInstitutionMembership($user)) {
             return false;
         }
 
         return $user->can(self::VIEW_PERMISSION);
     }
 
-    private function activeInstitutionUser(User $user): ?InstitutionUser
+    private function hasActiveInstitutionMembership(User $user): bool
     {
         return InstitutionUser::query()
             ->where('user_id', $user->id)
             ->where('status', 'active')
-            ->first();
+            ->exists();
+    }
+
+    private function hasActiveMembershipIn(User $user, int $institutionId): bool
+    {
+        return InstitutionUser::query()
+            ->where('user_id', $user->id)
+            ->where('institution_id', $institutionId)
+            ->where('status', 'active')
+            ->exists();
     }
 }

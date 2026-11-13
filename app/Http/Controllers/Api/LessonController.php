@@ -2,24 +2,27 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\AssessmentLockSetChanged;
 use App\Models\Lesson;
-use App\Models\Assignment;
-use App\Models\Quiz;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use App\Http\Controllers\Api\BaseApiController;
 use App\Models\User;
 use App\Models\Course;
 use App\Models\InstitutionUser;
+use App\Models\TeacherProfile;
 use App\Services\CourseEnrollmentService;
+use App\Services\CourseAssessmentLockService;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use App\Http\Requests\StoreLessonRequest;
 use App\Http\Requests\UpdateLessonRequest;
 
 class LessonController extends BaseApiController
 {
     public function __construct(
-        private CourseEnrollmentService $courseEnrollmentService
+        private CourseEnrollmentService $courseEnrollmentService,
+        private CourseAssessmentLockService $courseAssessmentLockService
     ) {
     }
 
@@ -121,51 +124,29 @@ class LessonController extends BaseApiController
     {
         $validated = $request->validated();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Course Ownership Validation
-    |--------------------------------------------------------------------------
-    */
-        $course = Course::findOrFail(
-            $validated['course_id']
-        );
-
-        $this->authorizeLessonAccess(
-            course: $course
-        );
-
-        /*
-    |--------------------------------------------------------------------------
-    | Course Section Validation
-    |--------------------------------------------------------------------------
-    */
-        if (!empty($validated['course_section_id'])) {
-
-            $section = $course->sections()
-                ->where(
-                    'id',
-                    $validated['course_section_id']
-                )
-                ->first();
-
-            if (!$section) {
-
-                abort(
-                    422,
-                    'Selected course section does not belong to the course.'
+        $lesson = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use ($validated): Lesson {
+                $courseId = (int) $validated['course_id'];
+                $course = $this->courseAssessmentLockService->lockCourse(
+                    $courseId,
+                    withTrashed: false
                 );
-            }
-        }
 
-        $lesson = Lesson::create(
-            $validated
-        );
+                $this->authorizeLessonAccess(course: $course);
+                $this->validateLessonSection(
+                    $course,
+                    $validated['course_section_id'] ?? null
+                );
 
-        if ($lesson->status === 'published') {
-            $this->courseEnrollmentService->recalculateCourseEnrollments(
-                (int) $lesson->course_id
-            );
-        }
+                $lesson = Lesson::create($validated);
+
+                if ($lesson->status === 'published') {
+                    $this->courseEnrollmentService
+                        ->recalculateCourseEnrollments((int) $lesson->course_id);
+                }
+
+                return $lesson->load(['course', 'courseSection']);
+            });
 
         return $this->successResponse(
             $lesson->load([
@@ -194,150 +175,268 @@ class LessonController extends BaseApiController
 
     public function update(UpdateLessonRequest $request, Lesson $lesson): JsonResponse
     {
-        /*
-    |--------------------------------------------------------------------------
-    | Existing Lesson Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeLessonAccess(
-            lesson: $lesson
-        );
-
         $validated = $request->validated();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Target Course Validation
-    |--------------------------------------------------------------------------
-    */
-        $course = isset($validated['course_id'])
-            ? Course::findOrFail($validated['course_id'])
-            : $lesson->course;
+        $lessonId = (int) $lesson->getKey();
+        $requestedCourseId = isset($validated['course_id'])
+            ? (int) $validated['course_id']
+            : null;
 
-        $this->authorizeLessonAccess(
-            course: $course
-        );
+        $updatedLesson = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use (
+                $lessonId,
+                $requestedCourseId,
+                $validated
+            ): Lesson {
+                $discoveredCourseId = $this->discoverActiveLessonCourseId($lessonId);
+                $targetCourseId = $requestedCourseId ?? $discoveredCourseId;
+                $lockedCourses = $this->lockActiveCourses([
+                    $discoveredCourseId,
+                    $targetCourseId,
+                ]);
+                $lockedLesson = $this->courseAssessmentLockService
+                    ->lockLesson($lessonId, withTrashed: false);
+                $currentCourseId = (int) $lockedLesson->course_id;
 
-        $originalCourseId = (int) $lesson->course_id;
-        $targetCourseId = (int) $course->id;
-        $courseChanged = $originalCourseId !== $targetCourseId;
+                if ($currentCourseId !== $discoveredCourseId) {
+                    throw new AssessmentLockSetChanged([
+                        $discoveredCourseId,
+                        $targetCourseId,
+                        $currentCourseId,
+                    ]);
+                }
 
-        if ($courseChanged) {
-            $hasIncompatibleQuiz = Quiz::where('lesson_id', $lesson->id)
-                ->where('course_id', '!=', $targetCourseId)
-                ->exists();
-            $hasIncompatibleAssignment = Assignment::where('lesson_id', $lesson->id)
-                ->where('course_id', '!=', $targetCourseId)
-                ->exists();
+                $currentCourse = $lockedCourses[$currentCourseId] ?? null;
+                $targetCourse = $lockedCourses[$targetCourseId] ?? null;
 
-            if ($hasIncompatibleQuiz || $hasIncompatibleAssignment) {
-                abort(
-                    422,
-                    'Attached quizzes and assignments must belong to the target course before moving this lesson.'
+                if (!$currentCourse || !$targetCourse) {
+                    throw new AssessmentLockSetChanged([
+                        $discoveredCourseId,
+                        $targetCourseId,
+                        $currentCourseId,
+                    ]);
+                }
+
+                $lockedLesson->setRelation('course', $currentCourse);
+                $this->authorizeLessonAccess(
+                    lesson: $lockedLesson,
+                    course: $currentCourse
                 );
-            }
+                $this->authorizeLessonAccess(course: $targetCourse);
 
-            if (
-                ! array_key_exists('course_section_id', $validated) &&
-                $lesson->course_section_id !== null &&
-                ! $course->sections()
-                    ->whereKey($lesson->course_section_id)
-                    ->exists()
-            ) {
-                $validated['course_section_id'] = null;
-            }
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Course Section Validation
-    |--------------------------------------------------------------------------
-    */
-        if (
-            array_key_exists('course_section_id', $validated)
-            && !empty($validated['course_section_id'])
-        ) {
-
-            $section = $course->sections()
-                ->where(
-                    'id',
-                    $validated['course_section_id']
-                )
-                ->first();
-
-            if (!$section) {
-
-                abort(
-                    422,
-                    'Selected course section does not belong to the course.'
+                $attributes = $validated;
+                $courseChanged = $currentCourseId !== $targetCourseId;
+                $sectionFieldProvided = array_key_exists(
+                    'course_section_id',
+                    $attributes
                 );
-            }
-        }
+                $targetSectionId = $sectionFieldProvided
+                    ? $this->nullableId($attributes['course_section_id'])
+                    : $this->nullableId($lockedLesson->course_section_id);
 
-        $wasPublished = $lesson->status === 'published';
+                if (
+                    $courseChanged &&
+                    !$sectionFieldProvided &&
+                    $targetSectionId !== null &&
+                    !$this->sectionBelongsToCourse($targetSectionId, $targetCourseId)
+                ) {
+                    // Preserve the existing behavior of clearing a foreign section
+                    // when moving a lesson without selecting a replacement.
+                    $attributes['course_section_id'] = null;
+                    $targetSectionId = null;
+                }
 
-        $lesson->update(
-            $validated
-        );
+                if (
+                    $targetSectionId !== null &&
+                    ($sectionFieldProvided || $courseChanged) &&
+                    !$this->sectionBelongsToCourse($targetSectionId, $targetCourseId)
+                ) {
+                    abort(
+                        422,
+                        'Selected course section does not belong to the course.'
+                    );
+                }
 
-        $isPublished = $lesson->status === 'published';
-        $newCourseId = (int) $lesson->course_id;
-        $publishedLessonSetChanged = $wasPublished !== $isPublished
-            || ($wasPublished && $isPublished && $originalCourseId !== $newCourseId);
+                if (
+                    $courseChanged &&
+                    $this->hasIncompatibleLessonDependents($lessonId, $targetCourseId)
+                ) {
+                    abort(
+                        422,
+                        'Attached assessments and live classes must belong to the target course before moving this lesson.'
+                    );
+                }
 
-        if ($publishedLessonSetChanged) {
-            $affectedCourseIds = [];
+                $originalCourseId = $currentCourseId;
+                $wasPublished = $lockedLesson->status === 'published';
+                $lockedLesson->update($attributes);
+                $isPublished = $lockedLesson->status === 'published';
+                $newCourseId = (int) $lockedLesson->course_id;
+                $publishedLessonSetChanged = $wasPublished !== $isPublished
+                    || ($wasPublished && $isPublished && $originalCourseId !== $newCourseId);
 
-            if ($wasPublished) {
-                $affectedCourseIds[] = $originalCourseId;
-            }
+                if ($publishedLessonSetChanged) {
+                    $affectedCourseIds = [];
 
-            if ($isPublished) {
-                $affectedCourseIds[] = $newCourseId;
-            }
+                    if ($wasPublished) {
+                        $affectedCourseIds[] = $originalCourseId;
+                    }
 
-            foreach (array_unique($affectedCourseIds) as $courseId) {
-                $this->courseEnrollmentService->recalculateCourseEnrollments(
-                    (int) $courseId
-                );
-            }
-        }
+                    if ($isPublished) {
+                        $affectedCourseIds[] = $newCourseId;
+                    }
+
+                    foreach (array_unique($affectedCourseIds) as $courseId) {
+                        $this->courseEnrollmentService
+                            ->recalculateCourseEnrollments((int) $courseId);
+                    }
+                }
+
+                return $lockedLesson->fresh()->load(['course', 'courseSection']);
+            });
 
         return $this->successResponse(
-            $lesson
-                ->fresh()
-                ->load([
-                    'course',
-                    'courseSection'
-                ]),
+            $updatedLesson,
             'Lesson updated successfully.'
         );
     }
 
     public function destroy(Lesson $lesson): JsonResponse
     {
-        /*
-    |--------------------------------------------------------------------------
-    | Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeLessonAccess(
-            lesson: $lesson
-        );
+        $lessonId = (int) $lesson->getKey();
 
-        $courseId = (int) $lesson->course_id;
-        $wasPublished = $lesson->status === 'published';
+        $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use ($lessonId): void {
+                $discoveredCourseId = $this->discoverActiveLessonCourseId($lessonId);
+                $lockedCourses = $this->lockActiveCourses([$discoveredCourseId]);
+                $lockedLesson = $this->courseAssessmentLockService
+                    ->lockLesson($lessonId, withTrashed: false);
+                $currentCourseId = (int) $lockedLesson->course_id;
 
-        $lesson->delete();
+                if ($currentCourseId !== $discoveredCourseId) {
+                    throw new AssessmentLockSetChanged([
+                        $discoveredCourseId,
+                        $currentCourseId,
+                    ]);
+                }
 
-        if ($wasPublished) {
-            $this->courseEnrollmentService->recalculateCourseEnrollments($courseId);
-        }
+                $course = $lockedCourses[$currentCourseId] ?? null;
+
+                if (!$course) {
+                    throw new AssessmentLockSetChanged([
+                        $discoveredCourseId,
+                        $currentCourseId,
+                    ]);
+                }
+
+                $lockedLesson->setRelation('course', $course);
+                $this->authorizeLessonAccess(
+                    lesson: $lockedLesson,
+                    course: $course
+                );
+
+                $wasPublished = $lockedLesson->status === 'published';
+                $lockedLesson->delete();
+
+                if ($wasPublished) {
+                    $this->courseEnrollmentService
+                        ->recalculateCourseEnrollments($currentCourseId);
+                }
+            });
 
         return $this->successResponse(
             null,
             'Lesson deleted successfully.'
         );
+    }
+
+    /** @return array<int, Course> */
+    private function lockActiveCourses(array $courseIds): array
+    {
+        $courseIds = array_values(array_unique(array_map('intval', $courseIds)));
+        sort($courseIds, SORT_NUMERIC);
+        $this->courseAssessmentLockService->lockCourses($courseIds);
+
+        $courses = Course::query()
+            ->whereIn('id', $courseIds)
+            ->get()
+            ->keyBy(static fn (Course $course): int => (int) $course->getKey());
+
+        foreach ($courseIds as $courseId) {
+            if (!$courses->has($courseId)) {
+                abort(404, 'Course not found.');
+            }
+        }
+
+        return $courses->all();
+    }
+
+    private function discoverActiveLessonCourseId(int $lessonId): int
+    {
+        $courseId = DB::table('lessons')
+            ->where('id', $lessonId)
+            ->whereNull('deleted_at')
+            ->value('course_id');
+
+        if ($courseId === null) {
+            abort(404, 'Lesson not found.');
+        }
+
+        return (int) $courseId;
+    }
+
+    private function validateLessonSection(Course $course, mixed $sectionId): void
+    {
+        if (
+            $sectionId !== null &&
+            !$this->sectionBelongsToCourse((int) $sectionId, (int) $course->id)
+        ) {
+            abort(
+                422,
+                'Selected course section does not belong to the course.'
+            );
+        }
+    }
+
+    private function sectionBelongsToCourse(int $sectionId, int $courseId): bool
+    {
+        return DB::table('course_sections')
+            ->where('id', $sectionId)
+            ->where('course_id', $courseId)
+            ->whereNull('deleted_at')
+            ->exists();
+    }
+
+    /**
+     * Query raw tables so retained soft-deleted references also constrain a
+     * course move; dependent definitions and live classes are never rewritten.
+     */
+    private function hasIncompatibleLessonDependents(
+        int $lessonId,
+        int $targetCourseId
+    ): bool {
+        foreach ([
+            'assignments',
+            'quizzes',
+            'question_banks',
+            'live_classes',
+        ] as $table) {
+            if (
+                DB::table($table)
+                    ->where('lesson_id', $lessonId)
+                    ->where('course_id', '!=', $targetCourseId)
+                    ->exists()
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function nullableId(mixed $value): ?int
+    {
+        return $value === null ? null : (int) $value;
     }
 
     private function authorizeLessonAccess(
@@ -408,7 +507,10 @@ class LessonController extends BaseApiController
     */
         if ($user->hasRole('teacher')) {
 
-            $teacherProfile = $user->teacherProfile;
+            $teacherProfile = TeacherProfile::where(
+                'user_id',
+                $user->id
+            )->first();
 
             if (!$teacherProfile) {
 

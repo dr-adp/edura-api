@@ -2,22 +2,35 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\AssessmentLockSetChanged;
 use App\Models\Assignment;
 use App\Models\AssignmentSubmission;
+use App\Models\Course;
 use App\Models\CourseEnrollment;
+use App\Models\StudentProfile;
+use App\Services\CourseAssessmentLockService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Validation\Rule;
 use App\Http\Controllers\Api\BaseApiController;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
 use App\Models\User;
 use App\Models\InstitutionUser;
+use App\Services\ParentStudentAccessService;
 use App\Http\Requests\StoreAssignmentSubmissionRequest;
 use App\Http\Requests\UpdateAssignmentSubmissionRequest;
+use Illuminate\Support\Collection;
+use Throwable;
 
 class AssignmentSubmissionController extends BaseApiController
 {
+    public function __construct(
+        private ParentStudentAccessService $parentStudentAccessService,
+        private CourseAssessmentLockService $courseAssessmentLockService
+    ) {
+    }
+
     public function index(): JsonResponse
     {
         /** @var User $user */
@@ -121,19 +134,10 @@ class AssignmentSubmissionController extends BaseApiController
 */
         if ($user->hasRole('parent')) {
 
-            $parentProfile = $user->parentProfile;
-
-            if (!$parentProfile) {
-
-                abort(
-                    403,
-                    'Unauthorized: Parent profile not found.'
-                );
-            }
-
-            $query->where(
-                'student_profile_id',
-                $parentProfile->student_profile_id
+            $this->parentStudentAccessService->scopeStudentRecords(
+                $query,
+                $user,
+                'assignment_submissions.student_profile_id'
             );
         }
 
@@ -188,142 +192,93 @@ class AssignmentSubmissionController extends BaseApiController
             );
         }
         $validated = $request->validated();
-
-        /*
-|--------------------------------------------------------------------------
-| Student Ownership Check
-|--------------------------------------------------------------------------
-*/
-        if ($user->hasRole('student')) {
-
-            $studentProfile = $user->studentProfile;
-
-            if (!$studentProfile) {
-
-                abort(
-                    403,
-                    'Student profile not found.'
-                );
-            }
-
-            if (
-                $validated['student_profile_id'] !=
-                $studentProfile->id
-            ) {
-
-                abort(
-                    403,
-                    'You can only submit your own assignments.'
-                );
-            }
-        }
-
-        /*
-|--------------------------------------------------------------------------
-| Enrollment Check
-|--------------------------------------------------------------------------
-*/
-        $assignment = Assignment::findOrFail(
-            $validated['assignment_id']
-        );
-
-        if ($user->hasRole('student')) {
-
-            $assignment->loadMissing('course');
-
-            if (
-                !$assignment->course ||
-                (int) $assignment->course->institution_id !==
-                    (int) $studentProfile->institution_id
-            ) {
-                abort(403, 'Course and student must belong to the same institution.');
-            }
-
-            $isEnrolled = $studentProfile
-                ->courseEnrollments()
-                ->institutionallyConsistent()
-                ->where(
-                    'course_id',
-                    $assignment->course_id
-                )
-                ->whereIn('status', ['active', 'completed'])
-                ->exists();
-
-            if (!$isEnrolled) {
-
-                abort(
-                    403,
-                    'You are not enrolled in this course.'
-                );
-            }
-        }
-
-        /*
-|--------------------------------------------------------------------------
-| Due Date Check
-|--------------------------------------------------------------------------
-*/
-        if (
-            $user->hasRole('student')
-            && $assignment->due_date
-            && now()->greaterThan($assignment->due_date)
-            && !$assignment->allow_late_submission
-        ) {
-
-            abort(
-                403,
-                'Submission deadline has passed.'
-            );
-        }
-
-        if ($request->hasFile('file')) {
-            $validated['file_path'] = $request->file('file')->store('assignment-submissions', 'public');
-        }
+        // The file is stored only after the locked checks pass below.
 
         unset($validated['file']);
 
-        if (($validated['status'] ?? null) === 'submitted') {
-            $validated['submitted_at'] = now();
-            $validated['is_late'] = $this->checkIfLate($validated['assignment_id']);
-        }
+        $storedFilePath = null;
 
-        /*
-|--------------------------------------------------------------------------
-| Prevent Duplicate / Reviewed Submission
-|--------------------------------------------------------------------------
-*/
-        $existingSubmission = AssignmentSubmission::where(
-            'assignment_id',
-            $validated['assignment_id']
-        )
-            ->where(
-                'student_profile_id',
-                $validated['student_profile_id']
-            )
-            ->first();
+        try {
+            $submission = $this->courseAssessmentLockService
+                ->transactionWithLockSetRetries(function () use (
+                    $request,
+                    $validated,
+                    $user,
+                    &$storedFilePath
+                ): AssignmentSubmission {
+                    $context = $this->lockSubmissionWriteContext(
+                        (int) $validated['assignment_id'],
+                        (int) $validated['student_profile_id']
+                    );
+                    /** @var Assignment $lockedAssignment */
+                    $lockedAssignment = $context['assignment'];
+                    /** @var StudentProfile $lockedStudent */
+                    $lockedStudent = $context['student'];
 
-        if ($existingSubmission) {
+                    if ($user->hasRole('student')) {
+                        if ((int) $lockedStudent->user_id !== (int) $user->id) {
+                            abort(403, 'You can only submit your own assignments.');
+                        }
 
-            if (
-                in_array(
-                    $existingSubmission->status,
-                    ['reviewed']
-                )
-            ) {
+                        if (
+                            $lockedAssignment->course->trashed() ||
+                            (int) $lockedAssignment->course->institution_id !==
+                            (int) $lockedStudent->institution_id
+                        ) {
+                            abort(403, 'Course and student must belong to the same institution.');
+                        }
 
-                abort(
-                    403,
-                    'Assignment has already been reviewed.'
-                );
+                        if (! $this->hasEligibleEnrollment(
+                            $context['enrollment'],
+                            $lockedAssignment,
+                            $lockedStudent
+                        )) {
+                            abort(403, 'You are not enrolled in this course.');
+                        }
+
+                        if (
+                            $lockedAssignment->due_date &&
+                            now()->greaterThan($lockedAssignment->due_date) &&
+                            ! $lockedAssignment->allow_late_submission
+                        ) {
+                            abort(403, 'Submission deadline has passed.');
+                        }
+                    }
+
+                    $existingSubmission = $context['existing_submission'];
+
+                    if ($existingSubmission) {
+                        if ($existingSubmission->status === 'reviewed') {
+                            abort(403, 'Assignment has already been reviewed.');
+                        }
+
+                        abort(403, 'Assignment has already been submitted.');
+                    }
+
+                    $attributes = $validated;
+
+                    if ($request->hasFile('file')) {
+                        $storedFilePath = $request->file('file')->store(
+                            'assignment-submissions',
+                            'public'
+                        );
+                        $attributes['file_path'] = $storedFilePath;
+                    }
+
+                    if (($attributes['status'] ?? null) === 'submitted') {
+                        $attributes['submitted_at'] = now();
+                        $attributes['is_late'] = $this->checkIfLate($lockedAssignment);
+                    }
+
+                    return AssignmentSubmission::create($attributes);
+                });
+        } catch (Throwable $exception) {
+            if ($storedFilePath !== null) {
+                Storage::disk('public')->delete($storedFilePath);
             }
 
-            abort(
-                403,
-                'Assignment has already been submitted.'
-            );
+            throw $exception;
         }
-
-        $submission = AssignmentSubmission::create($validated);
 
         return $this->successResponse(
             $submission->load([
@@ -379,19 +334,11 @@ class AssignmentSubmissionController extends BaseApiController
     */
         if ($user->hasRole('parent')) {
 
-            $parentProfile = $user->parentProfile;
-
-            if (
-                !$parentProfile ||
-                $assignmentSubmission->student_profile_id !==
-                $parentProfile->student_profile_id
-            ) {
-
-                abort(
-                    403,
-                    'Unauthorized: You can only view your child submissions.'
-                );
-            }
+            $this->parentStudentAccessService->authorizeStudent(
+                $user,
+                (int) $assignmentSubmission->student_profile_id,
+                'Unauthorized: You can only view your child submissions.'
+            );
         }
 
         /*
@@ -482,12 +429,6 @@ class AssignmentSubmissionController extends BaseApiController
         /** @var User $user */
         $user = Auth::user();
 
-        $assignmentSubmission->loadMissing([
-            'assignment.course',
-            'studentProfile',
-        ]);
-        $this->ensureSubmissionInstitutionalConsistency($assignmentSubmission, $user);
-
         /*
     |--------------------------------------------------------------------------
     | Role Protection
@@ -508,117 +449,95 @@ class AssignmentSubmissionController extends BaseApiController
 
         /*
     |--------------------------------------------------------------------------
-    | Student Ownership Check
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('student')) {
-
-            $studentProfile = $user->studentProfile;
-
-            if (
-                !$studentProfile ||
-                $assignmentSubmission->student_profile_id != $studentProfile->id
-            ) {
-
-                abort(
-                    403,
-                    'You can update only your own submission.'
-                );
-            }
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Prevent Editing Reviewed Submission
-    |--------------------------------------------------------------------------
-    */
-        if (
-            $assignmentSubmission->status === 'reviewed'
-        ) {
-
-            abort(
-                403,
-                'Reviewed assignments cannot be modified.'
-            );
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Due Date Check
-    |--------------------------------------------------------------------------
-    */
-        $assignment = $assignmentSubmission->assignment;
-
-        if (
-            $user->hasRole('student')
-            && $assignment->due_date
-            && now()->greaterThan($assignment->due_date)
-            && !$assignment->allow_late_submission
-        ) {
-
-            abort(
-                403,
-                'Submission deadline has passed.'
-            );
-        }
-
-        /*
-    |--------------------------------------------------------------------------
     | Validation
     |--------------------------------------------------------------------------
     */
         $validated = $request->validated();
+        $submissionId = (int) $assignmentSubmission->id;
+        $storedFilePath = null;
+        $previousFilePath = null;
 
-        /*
-    |--------------------------------------------------------------------------
-    | Replace File
-    |--------------------------------------------------------------------------
-    */
-        if ($request->hasFile('file')) {
+        try {
+            $updatedSubmission = $this->courseAssessmentLockService
+                ->transactionWithLockSetRetries(function () use (
+                    $request,
+                    $validated,
+                    $submissionId,
+                    $user,
+                    &$storedFilePath,
+                    &$previousFilePath
+                ): AssignmentSubmission {
+                    $context = $this->lockSubmissionMutationContext($submissionId);
+                    $lockedSubmission = $context['submission'];
+                    $lockedAssignment = $context['assignment'];
+                    $lockedStudent = $context['student'];
 
-            if (
-                $assignmentSubmission->file_path &&
-                Storage::disk('public')->exists(
-                    $assignmentSubmission->file_path
-                )
-            ) {
+                    $this->authorizeLockedSubmissionMutation(
+                        $lockedSubmission,
+                        $lockedAssignment,
+                        $lockedStudent,
+                        $context['enrollment'],
+                        $user,
+                        'update'
+                    );
 
-                Storage::disk('public')->delete(
-                    $assignmentSubmission->file_path
-                );
+                    $activeEvaluation = $context['evaluations']->first(
+                        static fn ($evaluation): bool => ! $evaluation->trashed()
+                    );
+                    if ($lockedSubmission->status === 'reviewed' || $activeEvaluation) {
+                        abort(403, 'Reviewed assignments cannot be modified.');
+                    }
+
+                    if (
+                        $user->hasRole('student') &&
+                        $lockedAssignment->due_date &&
+                        now()->greaterThan($lockedAssignment->due_date) &&
+                        ! $lockedAssignment->allow_late_submission
+                    ) {
+                        abort(403, 'Submission deadline has passed.');
+                    }
+
+                    $attributes = $validated;
+                    if ($request->hasFile('file')) {
+                        $previousFilePath = $lockedSubmission->file_path;
+                        $storedFilePath = $request->file('file')->store(
+                            'assignment-submissions',
+                            'public'
+                        );
+                        $attributes['file_path'] = $storedFilePath;
+                    }
+
+                    if (
+                        ($attributes['status'] ?? null) === 'submitted' &&
+                        ! $lockedSubmission->submitted_at
+                    ) {
+                        $attributes['submitted_at'] = now();
+                        $attributes['is_late'] = $this->checkIfLate($lockedAssignment);
+                    }
+
+                    $lockedSubmission->fill($attributes);
+                    $lockedSubmission->save();
+
+                    if ($storedFilePath !== null && $previousFilePath !== null) {
+                        DB::afterCommit(function () use ($previousFilePath): void {
+                            if (Storage::disk('public')->exists($previousFilePath)) {
+                                Storage::disk('public')->delete($previousFilePath);
+                            }
+                        });
+                    }
+
+                    return $lockedSubmission;
+                });
+        } catch (Throwable $exception) {
+            if ($storedFilePath !== null) {
+                Storage::disk('public')->delete($storedFilePath);
             }
 
-            $validated['file_path'] = $request
-                ->file('file')
-                ->store(
-                    'assignment-submissions',
-                    'public'
-                );
+            throw $exception;
         }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Submitted Timestamp
-    |--------------------------------------------------------------------------
-    */
-        if (
-            ($validated['status'] ?? null) === 'submitted'
-            && !$assignmentSubmission->submitted_at
-        ) {
-
-            $validated['submitted_at'] = now();
-
-            $validated['is_late'] =
-                $this->checkIfLate(
-                    $assignmentSubmission->assignment_id
-                );
-        }
-
-        $assignmentSubmission->fill($validated);
-        $assignmentSubmission->save();
 
         return $this->successResponse(
-            $assignmentSubmission
+            $updatedSubmission
                 ->fresh()
                 ->load([
                     'assignment.course',
@@ -636,12 +555,6 @@ class AssignmentSubmissionController extends BaseApiController
         /** @var User $user */
         $user = Auth::user();
 
-        $assignmentSubmission->loadMissing([
-            'assignment.course',
-            'studentProfile',
-        ]);
-        $this->ensureSubmissionInstitutionalConsistency($assignmentSubmission, $user);
-
         /*
     |--------------------------------------------------------------------------
     | Role Protection
@@ -660,63 +573,45 @@ class AssignmentSubmissionController extends BaseApiController
             );
         }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Student Ownership Check
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('student')) {
+        $submissionId = (int) $assignmentSubmission->id;
+        $this->courseAssessmentLockService->transactionWithLockSetRetries(
+            function () use ($submissionId, $user): void {
+                $context = $this->lockSubmissionMutationContext($submissionId);
+                $lockedSubmission = $context['submission'];
+                $lockedAssignment = $context['assignment'];
+                $lockedStudent = $context['student'];
 
-            $studentProfile = $user->studentProfile;
-
-            if (
-                !$studentProfile ||
-                $assignmentSubmission->student_profile_id != $studentProfile->id
-            ) {
-
-                abort(
-                    403,
-                    'You can delete only your own submission.'
+                $this->authorizeLockedSubmissionMutation(
+                    $lockedSubmission,
+                    $lockedAssignment,
+                    $lockedStudent,
+                    $context['enrollment'],
+                    $user,
+                    'delete'
                 );
+
+                $activeEvaluation = $context['evaluations']->first(
+                    static fn ($evaluation): bool => ! $evaluation->trashed()
+                );
+                if (
+                    in_array($lockedSubmission->status, ['submitted', 'reviewed'], true) ||
+                    $activeEvaluation
+                ) {
+                    abort(403, 'Submitted or reviewed assignments cannot be deleted.');
+                }
+
+                $filePath = $lockedSubmission->file_path;
+                $lockedSubmission->delete();
+
+                if ($filePath !== null) {
+                    DB::afterCommit(function () use ($filePath): void {
+                        if (Storage::disk('public')->exists($filePath)) {
+                            Storage::disk('public')->delete($filePath);
+                        }
+                    });
+                }
             }
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Prevent Deletion After Submission/Review
-    |--------------------------------------------------------------------------
-    */
-        if (
-            in_array(
-                $assignmentSubmission->status,
-                ['submitted', 'reviewed']
-            )
-        ) {
-
-            abort(
-                403,
-                'Submitted or reviewed assignments cannot be deleted.'
-            );
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Delete Attached File
-    |--------------------------------------------------------------------------
-    */
-        if (
-            $assignmentSubmission->file_path &&
-            Storage::disk('public')->exists(
-                $assignmentSubmission->file_path
-            )
-        ) {
-
-            Storage::disk('public')->delete(
-                $assignmentSubmission->file_path
-            );
-        }
-
-        $assignmentSubmission->delete();
+        );
 
         return $this->successResponse(
             null,
@@ -724,12 +619,192 @@ class AssignmentSubmissionController extends BaseApiController
         );
     }
 
-    private function checkIfLate(int $assignmentId): bool
+    /**
+     * Lock the parent rows and the unique assignment/student submission pair
+     * before creating a submission. The assignment/course identities are
+     * revalidated after their rows are locked.
+     *
+     * @return array{
+     *     course:Course,
+     *     student:StudentProfile,
+     *     enrollment:?CourseEnrollment,
+     *     assignment:Assignment,
+     *     existing_submission:?AssignmentSubmission
+     * }
+     */
+    private function lockSubmissionWriteContext(
+        int $assignmentId,
+        int $studentProfileId
+    ): array {
+        $assignmentIdentity = Assignment::withTrashed()->whereKey($assignmentId)->firstOrFail();
+        $courseId = (int) $assignmentIdentity->course_id;
+        $course = $this->courseAssessmentLockService->lockCourse($courseId);
+        $student = $this->courseAssessmentLockService->lockStudent($studentProfileId);
+        $enrollment = $this->courseAssessmentLockService->lockCourseEnrollments([[
+            'course_id' => $courseId,
+            'student_profile_id' => $studentProfileId,
+        ]])->first();
+        $assignment = $this->courseAssessmentLockService
+            ->lockAssignments([$assignmentId])
+            ->first();
+
+        if (! $assignment || $assignment->trashed()) {
+            abort(404);
+        }
+
+        if ((int) $assignment->course_id !== $courseId) {
+            throw new AssessmentLockSetChanged([$courseId, (int) $assignment->course_id]);
+        }
+
+        $assignment->setRelation('course', $course);
+        $existingSubmission = $this->courseAssessmentLockService
+            ->lockAssignmentSubmissionForPair($assignmentId, $studentProfileId);
+
+        return [
+            'course' => $course,
+            'student' => $student,
+            'enrollment' => $enrollment,
+            'assignment' => $assignment,
+            'existing_submission' => $existingSubmission,
+        ];
+    }
+
+    /**
+     * Lock a submission's complete relationship chain before mutation.
+     * Preliminary reads discover the lock set only; all identities are
+     * checked again after the corresponding rows have been locked.
+     *
+     * @return array{
+     *     course:Course,
+     *     student:StudentProfile,
+     *     enrollment:?CourseEnrollment,
+     *     assignment:Assignment,
+     *     submission:AssignmentSubmission,
+     *     evaluations:Collection<int, \App\Models\AssignmentEvaluation>
+     * }
+     */
+    private function lockSubmissionMutationContext(int $submissionId): array
     {
-        $dueDate = Assignment::where(
-            'id',
-            $assignmentId
-        )->value('due_date');
+        $submissionIdentity = AssignmentSubmission::withTrashed()
+            ->whereKey($submissionId)
+            ->firstOrFail();
+        $assignmentId = (int) $submissionIdentity->assignment_id;
+        $studentProfileId = (int) $submissionIdentity->student_profile_id;
+        $assignmentIdentity = Assignment::withTrashed()->whereKey($assignmentId)->firstOrFail();
+        $courseId = (int) $assignmentIdentity->course_id;
+
+        $course = $this->courseAssessmentLockService->lockCourse($courseId);
+        $student = $this->courseAssessmentLockService->lockStudent($studentProfileId);
+        $enrollment = $this->courseAssessmentLockService->lockCourseEnrollments([[
+            'course_id' => $courseId,
+            'student_profile_id' => $studentProfileId,
+        ]])->first();
+        $assignment = $this->courseAssessmentLockService
+            ->lockAssignments([$assignmentId])
+            ->first();
+
+        if (! $assignment) {
+            abort(404);
+        }
+
+        if ((int) $assignment->course_id !== $courseId) {
+            throw new AssessmentLockSetChanged([$courseId, (int) ($assignment?->course_id ?? 0)]);
+        }
+
+        $submission = $this->courseAssessmentLockService
+            ->lockAssignmentSubmissions([$submissionId])
+            ->first();
+
+        if (! $submission || $submission->trashed()) {
+            abort(404);
+        }
+
+        if (
+            (int) $submission->assignment_id !== $assignmentId ||
+            (int) $submission->student_profile_id !== $studentProfileId
+        ) {
+            throw new AssessmentLockSetChanged([$courseId], [$studentProfileId]);
+        }
+
+        $evaluations = $this->courseAssessmentLockService
+            ->lockAssignmentEvaluationsForSubmissions([$submissionId]);
+
+        $assignment->setRelation('course', $course);
+        $submission->setRelation('assignment', $assignment);
+        $submission->setRelation('studentProfile', $student);
+
+        return [
+            'course' => $course,
+            'student' => $student,
+            'enrollment' => $enrollment,
+            'assignment' => $assignment,
+            'submission' => $submission,
+            'evaluations' => $evaluations,
+        ];
+    }
+
+    private function authorizeLockedSubmissionMutation(
+        AssignmentSubmission $submission,
+        Assignment $assignment,
+        StudentProfile $student,
+        ?CourseEnrollment $enrollment,
+        User $user,
+        string $operation
+    ): void {
+        $course = $assignment->course;
+
+        if (
+            ! $user->hasRole('super-admin') &&
+            (
+                $assignment->trashed() ||
+                ! $course ||
+                $course->trashed() ||
+                $course->institution_id === null ||
+                $student->institution_id === null ||
+                (int) $course->institution_id !== (int) $student->institution_id
+            )
+        ) {
+            abort(403, 'Course and student must belong to the same institution.');
+        }
+
+        if ($user->hasRole('student')) {
+            if ((int) $student->user_id !== (int) $user->id) {
+                abort(
+                    403,
+                    $operation === 'delete'
+                        ? 'You can delete only your own submission.'
+                        : 'You can update only your own submission.'
+                );
+            }
+
+            if (! $this->hasEligibleEnrollment($enrollment, $assignment, $student)) {
+                abort(403, 'You are not enrolled in this course.');
+            }
+        }
+    }
+
+    private function hasEligibleEnrollment(
+        ?CourseEnrollment $enrollment,
+        Assignment $assignment,
+        StudentProfile $student
+    ): bool {
+        $course = $assignment->course;
+
+        return $enrollment !== null &&
+            ! $enrollment->trashed() &&
+            (int) $enrollment->course_id === (int) $assignment->course_id &&
+            (int) $enrollment->student_profile_id === (int) $student->id &&
+            in_array($enrollment->status, ['active', 'completed'], true) &&
+            $course !== null &&
+            ! $course->trashed() &&
+            $course->institution_id !== null &&
+            $student->institution_id !== null &&
+            (int) $course->institution_id === (int) $student->institution_id;
+    }
+
+    private function checkIfLate(Assignment $assignment): bool
+    {
+        $dueDate = $assignment->due_date;
 
         return $dueDate
             ? now()->greaterThan($dueDate)

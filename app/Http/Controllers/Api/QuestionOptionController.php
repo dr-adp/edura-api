@@ -13,6 +13,8 @@ use App\Models\InstitutionUser;
 use Illuminate\Support\Facades\Auth;
 use App\Http\Requests\StoreQuestionOptionRequest;
 use App\Http\Requests\UpdateQuestionOptionRequest;
+use App\Services\CourseAssessmentLockService;
+use Illuminate\Support\Facades\DB;
 
 class QuestionOptionController extends Controller
 {
@@ -126,9 +128,26 @@ class QuestionOptionController extends Controller
         );
 
 
-        $option = QuestionOption::create(
-            $validated
-        );
+        $questionBankId = (int) $questionBank->id;
+        $option = app(CourseAssessmentLockService::class)
+            ->transactionWithLockSetRetries(function () use ($validated, $questionBankId): QuestionOption {
+                $locks = app(CourseAssessmentLockService::class);
+                $parents = $locks->lockQuestionBanksAndCourses([$questionBankId]);
+                $lockedQuestionBank = $parents['question_banks']->firstWhere('id', $questionBankId);
+                if (!$lockedQuestionBank) {
+                    abort(404);
+                }
+
+                $this->authorizeQuestionOptionAccess(questionBank: $lockedQuestionBank);
+                $this->assertQuizQuestionLinksMatchBankCourses(
+                    $parents['quiz_questions'],
+                    $parents['quizzes'],
+                    $parents['question_banks']
+                );
+                $validated['question_bank_id'] = $questionBankId;
+
+                return QuestionOption::create($validated);
+            });
 
         return response()->json([
             'message' => 'Question option created successfully.',
@@ -165,34 +184,66 @@ class QuestionOptionController extends Controller
 
         $validated = $request->validated();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Target Question Validation
-    |--------------------------------------------------------------------------
-    */
-        if (isset($validated['question_bank_id'])) {
-
-            $questionBank = QuestionBank::with('course')
-                ->findOrFail(
-                    $validated['question_bank_id']
-                );
-
-            $this->authorizeQuestionOptionAccess(
-                questionBank: $questionBank
+        $questionOptionId = (int) $questionOption->id;
+        $targetQuestionBankId = isset($validated['question_bank_id'])
+            ? (int) $validated['question_bank_id']
+            : (int) $questionOption->question_bank_id;
+        $targetQuestionBank = QuestionBank::with('course')->findOrFail($targetQuestionBankId);
+        $this->authorizeQuestionOptionAccess(questionBank: $targetQuestionBank);
+        $locks = app(CourseAssessmentLockService::class);
+        $updatedOption = $locks->transactionWithLockSetRetries(function () use (
+            $locks,
+            $validated,
+            $questionOptionId,
+            $targetQuestionBankId
+        ): QuestionOption {
+            $parents = $locks->lockQuestionOptionAndCourses(
+                $questionOptionId,
+                [$targetQuestionBankId]
             );
-        }
+            $lockedOption = $parents['question_option'];
+            $lockedTargetBank = $parents['question_banks']->firstWhere('id', $targetQuestionBankId);
+            if (!$lockedOption || !$lockedTargetBank) {
+                abort(404);
+            }
 
-        $questionOption->update(
-            $validated
-        );
+            $resolvedQuestionBankId = isset($validated['question_bank_id'])
+                ? $targetQuestionBankId
+                : (int) $lockedOption->question_bank_id;
+            $resolvedTargetBank = $parents['question_banks']->firstWhere(
+                'id',
+                $resolvedQuestionBankId
+            );
+            if (!$resolvedTargetBank) {
+                abort(404);
+            }
+
+            $this->authorizeQuestionOptionAccess(questionOption: $lockedOption);
+            $this->authorizeQuestionOptionAccess(questionBank: $resolvedTargetBank);
+            $this->assertQuizQuestionLinksMatchBankCourses(
+                $parents['quiz_questions'],
+                $parents['quizzes'],
+                $parents['question_banks']
+            );
+
+            if (
+                (int) $lockedOption->question_bank_id !== $resolvedQuestionBankId &&
+                DB::table('quiz_answers')
+                    ->where('question_option_id', $questionOptionId)
+                    ->exists()
+            ) {
+                abort(409, 'An option referenced by answer history cannot be moved to another question.');
+            }
+
+            $validated['question_bank_id'] = $resolvedQuestionBankId;
+            $lockedOption->update($validated);
+
+            return $lockedOption->fresh()->load('questionBank.course');
+        });
 
         return response()->json([
             'message' => 'Question option updated successfully.',
-            'data' => $questionOption
-                ->fresh()
-                ->load([
-                    'questionBank.course'
-                ]),
+            'data' => $updatedOption,
         ]);
     }
 
@@ -207,7 +258,22 @@ class QuestionOptionController extends Controller
             questionOption: $questionOption
         );
 
-        $questionOption->delete();
+        $questionOptionId = (int) $questionOption->id;
+        $locks = app(CourseAssessmentLockService::class);
+        $locks->transactionWithLockSetRetries(function () use ($locks, $questionOptionId): void {
+            $parents = $locks->lockQuestionOptionAndCourses($questionOptionId);
+            $lockedOption = $parents['question_option'];
+            if (!$lockedOption) {
+                abort(404);
+            }
+            $this->authorizeQuestionOptionAccess(questionOption: $lockedOption);
+            $this->assertQuizQuestionLinksMatchBankCourses(
+                $parents['quiz_questions'],
+                $parents['quizzes'],
+                $parents['question_banks']
+            );
+            $lockedOption->delete();
+        });
 
         return response()->json([
             'message' => 'Question option deleted successfully.',
@@ -323,5 +389,24 @@ class QuestionOptionController extends Controller
             403,
             'Unauthorized role.'
         );
+    }
+
+    private function assertQuizQuestionLinksMatchBankCourses(
+        \Illuminate\Support\Collection $links,
+        \Illuminate\Support\Collection $quizzes,
+        \Illuminate\Support\Collection $questionBanks
+    ): void {
+        foreach ($links as $link) {
+            $quiz = $quizzes->firstWhere('id', (int) $link->quiz_id);
+            $questionBank = $questionBanks->firstWhere('id', (int) $link->question_bank_id);
+
+            if (
+                !$quiz ||
+                !$questionBank ||
+                (int) $quiz->course_id !== (int) $questionBank->course_id
+            ) {
+                abort(422, 'A question option cannot be changed while its quiz and question belong to different courses.');
+            }
+        }
     }
 }

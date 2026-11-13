@@ -14,6 +14,7 @@ use App\Models\CourseSection;
 use Illuminate\Support\Facades\Auth;
 use App\Http\Requests\StoreQuizRequest;
 use App\Http\Requests\UpdateQuizRequest;
+use App\Services\CourseAssessmentLockService;
 
 class QuizController extends BaseApiController
 {
@@ -125,70 +126,41 @@ class QuizController extends BaseApiController
     | Course Validation
     |--------------------------------------------------------------------------
     */
-        $course = Course::findOrFail(
-            $validated['course_id']
-        );
+        $course = Course::findOrFail($validated['course_id']);
 
         $this->authorizeQuizAccess(
             course: $course
         );
 
-        /*
-    |--------------------------------------------------------------------------
-    | Teacher Ownership Protection
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('teacher')) {
+        $quiz = app(CourseAssessmentLockService::class)
+            ->transactionWithLockSetRetries(function () use ($validated, $user): Quiz {
+                $locks = app(CourseAssessmentLockService::class);
+                $courseId = (int) $validated['course_id'];
 
-            $teacherProfile = $user->teacherProfile;
+                $locks->lockCourses([$courseId]);
+                $course = Course::findOrFail($courseId);
+                $this->authorizeQuizAccess(course: $course);
 
-            if (!$teacherProfile) {
+                if ($user->hasRole('teacher')) {
+                    $teacherProfile = $user->teacherProfile;
+                    if (!$teacherProfile) {
+                        abort(403, 'Teacher profile not found.');
+                    }
+                    $validated['teacher_profile_id'] = $teacherProfile->id;
+                }
 
-                abort(
-                    403,
-                    'Teacher profile not found.'
-                );
-            }
+                if ($user->hasRole('institution-admin')) {
+                    $validated['teacher_profile_id'] = $course->teacher_profile_id;
+                }
 
-            $validated['teacher_profile_id'] =
-                $teacherProfile->id;
-        }
+                $this->validateQuizRelations($validated, $course);
 
-        /*
-    |--------------------------------------------------------------------------
-    | Institution Admin Protection
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('institution-admin')) {
+                if (empty($validated['teacher_profile_id'])) {
+                    $validated['teacher_profile_id'] = $course->teacher_profile_id;
+                }
 
-            $validated['teacher_profile_id'] =
-                $course->teacher_profile_id;
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Relationship Validation
-    |--------------------------------------------------------------------------
-    */
-        $this->validateQuizRelations(
-            $validated,
-            $course
-        );
-
-        /*
-    |--------------------------------------------------------------------------
-    | Default Teacher Assignment
-    |--------------------------------------------------------------------------
-    */
-        if (empty($validated['teacher_profile_id'])) {
-
-            $validated['teacher_profile_id'] =
-                $course->teacher_profile_id;
-        }
-
-        $quiz = Quiz::create(
-            $validated
-        );
+                return Quiz::create($validated);
+            });
 
         return $this->successResponse(
             $quiz->load([
@@ -240,76 +212,79 @@ class QuizController extends BaseApiController
     | Target Course Validation
     |--------------------------------------------------------------------------
     */
-        $course = isset($validated['course_id'])
-            ? Course::findOrFail($validated['course_id'])
-            : $quiz->course;
+        $requestedCourseId = isset($validated['course_id'])
+            ? (int) $validated['course_id']
+            : (int) $quiz->course_id;
+        $course = Course::findOrFail($requestedCourseId);
 
         $this->authorizeQuizAccess(
             course: $course
         );
 
-        /*
-    |--------------------------------------------------------------------------
-    | Teacher Ownership Protection
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('teacher')) {
+        $quizId = (int) $quiz->id;
+        $boundCourseId = (int) $quiz->course_id;
+        $locks = app(CourseAssessmentLockService::class);
+        $updatedQuiz = $locks->transactionWithLockSetRetries(function () use (
+            $locks,
+            $validated,
+            $user,
+            $quizId,
+            $boundCourseId,
+            $requestedCourseId
+        ): Quiz {
+            $lockedQuiz = $locks->lockQuizDefinitionAndCourses(
+                $quizId,
+                [$boundCourseId, $requestedCourseId]
+            );
+            $targetCourseId = isset($validated['course_id'])
+                ? (int) $validated['course_id']
+                : (int) $lockedQuiz->course_id;
+            $course = Course::findOrFail($targetCourseId);
 
-            $teacherProfile = $user->teacherProfile;
+            $this->authorizeQuizAccess(quiz: $lockedQuiz);
+            $this->authorizeQuizAccess(course: $course);
 
-            if (!$teacherProfile) {
-
-                abort(
-                    403,
-                    'Teacher profile not found.'
-                );
+            if ($user->hasRole('teacher')) {
+                $teacherProfile = $user->teacherProfile;
+                if (!$teacherProfile) {
+                    abort(403, 'Teacher profile not found.');
+                }
+                $validated['teacher_profile_id'] = $teacherProfile->id;
             }
 
-            $validated['teacher_profile_id'] =
-                $teacherProfile->id;
-        }
+            if ($user->hasRole('institution-admin')) {
+                $validated['teacher_profile_id'] = $course->teacher_profile_id;
+            }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Institution Admin Protection
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('institution-admin')) {
+            $this->validateQuizRelations($validated, $course);
+            $effectiveRelations = array_merge(
+                [
+                    'course_section_id' => $lockedQuiz->course_section_id,
+                    'lesson_id' => $lockedQuiz->lesson_id,
+                ],
+                array_intersect_key($validated, array_flip(['course_section_id', 'lesson_id']))
+            );
+            $this->validateQuizRelations($effectiveRelations, $course);
 
-            $validated['teacher_profile_id'] =
-                $course->teacher_profile_id;
-        }
+            if ((int) $lockedQuiz->course_id !== $targetCourseId) {
+                foreach ($lockedQuiz->lockedDefinitionQuestionLinks as $questionLink) {
+                    if ((int) $questionLink->questionBank?->course_id !== $targetCourseId) {
+                        abort(422, 'A quiz with linked questions cannot be moved to a different course.');
+                    }
+                }
+            }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Relationship Validation
-    |--------------------------------------------------------------------------
-    */
-        $this->validateQuizRelations(
-            $validated,
-            $course
-        );
+            if (!isset($validated['teacher_profile_id'])) {
+                $validated['teacher_profile_id'] = $course->teacher_profile_id;
+            }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Default Teacher Assignment
-    |--------------------------------------------------------------------------
-    */
-        if (
-            !isset($validated['teacher_profile_id'])
-        ) {
+            $lockedQuiz->update($validated);
 
-            $validated['teacher_profile_id'] =
-                $course->teacher_profile_id;
-        }
-
-        $quiz->update(
-            $validated
-        );
+            return $lockedQuiz->fresh();
+        });
 
         return $this->successResponse(
-            $quiz
-                ->fresh()
+            $updatedQuiz
                 ->load([
                     'course',
                     'courseSection',
@@ -331,7 +306,14 @@ class QuizController extends BaseApiController
             quiz: $quiz
         );
 
-        $quiz->delete();
+        $quizId = (int) $quiz->id;
+        $courseId = (int) $quiz->course_id;
+        $locks = app(CourseAssessmentLockService::class);
+        $locks->transactionWithLockSetRetries(function () use ($locks, $quizId, $courseId): void {
+            $lockedQuiz = $locks->lockQuizDefinitionAndCourses($quizId, [$courseId]);
+            $this->authorizeQuizAccess(quiz: $lockedQuiz);
+            $lockedQuiz->delete();
+        });
 
         return $this->successResponse(
             null,

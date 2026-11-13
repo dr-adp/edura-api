@@ -251,9 +251,9 @@ class AuditLogService
             ]);
 
         if ($viewer->hasRole('institution-admin')) {
-            $query->where(
+            $query->whereIn(
                 'institution_id',
-                $this->institutionAccess->institutionIdFor($viewer)
+                $this->institutionAccess->institutionIdsFor($viewer)
             );
         } elseif (isset($filters['institution_id'])) {
             $query->where('institution_id', (int) $filters['institution_id']);
@@ -376,38 +376,54 @@ class AuditLogService
      * model's institution remains the authoritative context.
      */
         if ($user && ! $user->hasRole('super-admin')) {
-            $userInstitutionId = $this->institutionAccess
-                ->institutionIdFor($user);
+            if ($user->hasRole('institution-admin')) {
+                if (! $this->institutionAccess->hasActiveMembershipIn($user, (int) $resolvedInstitutionId)) {
+                    throw new DomainException(
+                        'Audit institution does not match the authenticated user institution.',
+                        [
+                            'institution_id' => $resolvedInstitutionId,
+                            'user_id' => $user->id,
+                        ]
+                    );
+                }
+            } else {
+                $userInstitutionId = $this->institutionAccess
+                    ->institutionIdFor($user);
 
-            if (
-                $userInstitutionId !== null &&
-                (int) $resolvedInstitutionId !== (int) $userInstitutionId
-            ) {
-                throw new DomainException(
-                    'Audit institution does not match the authenticated user institution.',
-                    [
-                        'institution_id' => $resolvedInstitutionId,
-                        'user_institution_id' => $userInstitutionId,
-                    ]
-                );
-            }
+                if (
+                    $userInstitutionId !== null &&
+                    (int) $resolvedInstitutionId !== (int) $userInstitutionId &&
+                    ! $this->institutionAccess->hasActiveMembershipIn(
+                        $user,
+                        (int) $resolvedInstitutionId
+                    )
+                ) {
+                    throw new DomainException(
+                        'Audit institution does not match the authenticated user institution.',
+                        [
+                            'institution_id' => $resolvedInstitutionId,
+                            'user_institution_id' => $userInstitutionId,
+                        ]
+                    );
+                }
 
-            /*
-         * If the user has no InstitutionUser context, an explicit
-         * institution without an auditable institution is not safe.
-         */
-            if (
-                $userInstitutionId === null &&
-                $auditableInstitutionId === null &&
-                $institutionId !== null
-            ) {
-                throw new DomainException(
-                    'Unable to verify the authenticated user institution.',
-                    [
-                        'institution_id' => $resolvedInstitutionId,
-                        'user_id' => $user->id,
-                    ]
-                );
+                /*
+             * If the user has no InstitutionUser context, an explicit
+             * institution without an auditable institution is not safe.
+             */
+                if (
+                    $userInstitutionId === null &&
+                    $auditableInstitutionId === null &&
+                    $institutionId !== null
+                ) {
+                    throw new DomainException(
+                        'Unable to verify the authenticated user institution.',
+                        [
+                            'institution_id' => $resolvedInstitutionId,
+                            'user_id' => $user->id,
+                        ]
+                    );
+                }
             }
         }
 

@@ -15,6 +15,8 @@ use App\Models\InstitutionUser;
 use Illuminate\Support\Facades\Auth;
 use App\Http\Requests\StoreQuizQuestionRequest;
 use App\Http\Requests\UpdateQuizQuestionRequest;
+use App\Services\CourseAssessmentLockService;
+use Illuminate\Validation\ValidationException;
 
 class QuizQuestionController extends Controller
 {
@@ -143,27 +145,42 @@ class QuizQuestionController extends Controller
             $questionBank
         );
 
-        /*
-    |--------------------------------------------------------------------------
-    | Default Marks
-    |--------------------------------------------------------------------------
-    */
-        if (
-            !isset($validated['marks']) ||
-            $validated['marks'] === null
-        ) {
+        $quizId = (int) $quiz->id;
+        $questionBankId = (int) $questionBank->id;
+        $locks = app(CourseAssessmentLockService::class);
+        $quizQuestion = $locks->transactionWithLockSetRetries(function () use (
+            $locks,
+            $validated,
+            $quizId,
+            $questionBankId
+        ): QuizQuestion {
+            $parents = $locks->lockQuizQuestionDefinitionAndCourses(
+                null,
+                [$quizId],
+                [$questionBankId]
+            );
+            $lockedQuiz = $parents['quizzes']->firstWhere('id', $quizId);
+            $lockedQuestionBank = $parents['question_banks']->firstWhere('id', $questionBankId);
 
-            $validated['marks'] =
-                $questionBank->marks ?? 0;
-        }
+            if (!$lockedQuiz || !$lockedQuestionBank) {
+                abort(404);
+            }
 
-        $quizQuestion = QuizQuestion::create(
-            $validated
-        );
+            $this->authorizeQuizQuestionAccess(quiz: $lockedQuiz);
+            $this->validateQuizQuestionRelations($lockedQuiz, $lockedQuestionBank);
+            $this->assertQuizQuestionLinkDoesNotExist($quizId, $questionBankId);
 
-        $this->recalculateQuizTotalMarks(
-            $quizQuestion->quiz
-        );
+            $validated['quiz_id'] = $quizId;
+            $validated['question_bank_id'] = $questionBankId;
+            if (!isset($validated['marks']) || $validated['marks'] === null) {
+                $validated['marks'] = $lockedQuestionBank->marks ?? 0;
+            }
+
+            $quizQuestion = QuizQuestion::create($validated);
+            $this->recalculateQuizTotalMarks($lockedQuiz);
+
+            return $quizQuestion;
+        });
 
         return response()->json([
             'message' => 'Question added to quiz successfully.',
@@ -202,79 +219,86 @@ class QuizQuestionController extends Controller
 
         $validated = $request->validated();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Determine Target Quiz
-    |--------------------------------------------------------------------------
-    */
+        $currentQuizId = (int) $quizQuestion->quiz_id;
+        $currentQuestionBankId = (int) $quizQuestion->question_bank_id;
+        $targetQuizId = isset($validated['quiz_id'])
+            ? (int) $validated['quiz_id']
+            : $currentQuizId;
+        $targetQuestionBankId = isset($validated['question_bank_id'])
+            ? (int) $validated['question_bank_id']
+            : $currentQuestionBankId;
+        $targetQuiz = Quiz::with('course')->findOrFail($targetQuizId);
+        $this->authorizeQuizQuestionAccess(quiz: $targetQuiz);
+        $targetQuestionBank = QuestionBank::with('course')->findOrFail($targetQuestionBankId);
+        $this->validateQuizQuestionRelations($targetQuiz, $targetQuestionBank);
 
+        $quizQuestionId = (int) $quizQuestion->id;
+        $locks = app(CourseAssessmentLockService::class);
+        $updatedQuizQuestion = $locks->transactionWithLockSetRetries(function () use (
+            $locks,
+            $validated,
+            $quizQuestionId,
+            $currentQuizId,
+            $currentQuestionBankId,
+            $targetQuizId,
+            $targetQuestionBankId
+        ): QuizQuestion {
+            $parents = $locks->lockQuizQuestionDefinitionAndCourses(
+                $quizQuestionId,
+                [$currentQuizId, $targetQuizId],
+                [$currentQuestionBankId, $targetQuestionBankId]
+            );
+            $lockedLink = $parents['quiz_question'];
+            if (!$lockedLink) {
+                abort(404);
+            }
 
-        $quiz = isset($validated['quiz_id'])
-            ? Quiz::with('course')->findOrFail($validated['quiz_id'])
-            : $quizQuestion->loadMissing('quiz.course')->quiz;
+            $resolvedQuizId = isset($validated['quiz_id'])
+                ? $targetQuizId
+                : (int) $lockedLink->quiz_id;
+            $resolvedQuestionBankId = isset($validated['question_bank_id'])
+                ? $targetQuestionBankId
+                : (int) $lockedLink->question_bank_id;
+            $oldQuiz = $parents['quizzes']->firstWhere('id', (int) $lockedLink->quiz_id);
+            $newQuiz = $parents['quizzes']->firstWhere('id', $resolvedQuizId);
+            $questionBank = $parents['question_banks']->firstWhere('id', $resolvedQuestionBankId);
+            if (!$oldQuiz || !$newQuiz || !$questionBank) {
+                abort(404);
+            }
 
+            $lockedLink->setRelation('quiz', $oldQuiz->load('course'));
+            $lockedLink->setRelation('questionBank', $parents['question_banks']->firstWhere(
+                'id',
+                (int) $lockedLink->question_bank_id
+            )?->load('course'));
+            $this->authorizeQuizQuestionAccess(quizQuestion: $lockedLink);
+            $this->authorizeQuizQuestionAccess(quiz: $newQuiz);
+            $this->validateQuizQuestionRelations($newQuiz, $questionBank);
+            $this->assertQuizQuestionLinkDoesNotExist(
+                $resolvedQuizId,
+                $resolvedQuestionBankId,
+                $quizQuestionId
+            );
 
+            if (array_key_exists('marks', $validated) && $validated['marks'] === null) {
+                $validated['marks'] = $questionBank->marks ?? 0;
+            }
+            $validated['quiz_id'] = $resolvedQuizId;
+            $validated['question_bank_id'] = $resolvedQuestionBankId;
 
-        $this->authorizeQuizQuestionAccess(
-            quiz: $quiz
-        );
+            $lockedLink->update($validated);
 
-        /*
-    |--------------------------------------------------------------------------
-    | Determine Target Question Bank
-    |--------------------------------------------------------------------------
-    */
-        $questionBank = isset($validated['question_bank_id'])
-            ? QuestionBank::with('course')->findOrFail($validated['question_bank_id'])
-            : $quizQuestion->loadMissing('questionBank.course')->questionBank;
+            $quizzesToRecalculate = collect([$oldQuiz, $newQuiz])->unique('id');
+            foreach ($quizzesToRecalculate as $quizToRecalculate) {
+                $this->recalculateQuizTotalMarks($quizToRecalculate);
+            }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Cross Validation
-    |--------------------------------------------------------------------------
-    */
-        $this->validateQuizQuestionRelations(
-            $quiz,
-            $questionBank
-        );
-
-        /*
-    |--------------------------------------------------------------------------
-    | Default Marks From Question Bank
-    |--------------------------------------------------------------------------
-    */
-        if (
-            array_key_exists('marks', $validated) &&
-            $validated['marks'] === null
-        ) {
-
-            $validated['marks'] =
-                $questionBank->marks ?? 0;
-        }
-
-        $oldQuiz = $quizQuestion->quiz;
-
-        $quizQuestion->update(
-            $validated
-        );
-
-        /*
-    |--------------------------------------------------------------------------
-    | Recalculate Totals
-    |--------------------------------------------------------------------------
-    */
-        $this->recalculateQuizTotalMarks(
-            $oldQuiz
-        );
-
-        $this->recalculateQuizTotalMarks(
-            $quizQuestion->fresh()->quiz
-        );
+            return $lockedLink->fresh();
+        });
 
         return response()->json([
             'message' => 'Quiz question updated successfully.',
-            'data' => $quizQuestion
-                ->fresh()
+            'data' => $updatedQuizQuestion
                 ->load([
                     'quiz.course',
                     'questionBank.options'
@@ -293,13 +317,41 @@ class QuizQuestionController extends Controller
             quizQuestion: $quizQuestion
         );
 
-        $quiz = $quizQuestion->quiz;
+        $quizQuestionId = (int) $quizQuestion->id;
+        $quizId = (int) $quizQuestion->quiz_id;
+        $questionBankId = (int) $quizQuestion->question_bank_id;
+        $locks = app(CourseAssessmentLockService::class);
+        $locks->transactionWithLockSetRetries(function () use (
+            $locks,
+            $quizQuestionId,
+            $quizId,
+            $questionBankId
+        ): void {
+            $parents = $locks->lockQuizQuestionDefinitionAndCourses(
+                $quizQuestionId,
+                [$quizId],
+                [$questionBankId]
+            );
+            $lockedLink = $parents['quiz_question'];
+            if (!$lockedLink) {
+                abort(404);
+            }
 
-        $quizQuestion->delete();
+            $quiz = $parents['quizzes']->firstWhere('id', (int) $lockedLink->quiz_id);
+            $questionBank = $parents['question_banks']->firstWhere(
+                'id',
+                (int) $lockedLink->question_bank_id
+            );
+            if (!$quiz || !$questionBank) {
+                abort(404);
+            }
+            $lockedLink->setRelation('quiz', $quiz->load('course'));
+            $lockedLink->setRelation('questionBank', $questionBank->load('course'));
+            $this->authorizeQuizQuestionAccess(quizQuestion: $lockedLink);
 
-        $this->recalculateQuizTotalMarks(
-            $quiz
-        );
+            $lockedLink->delete();
+            $this->recalculateQuizTotalMarks($quiz);
+        });
 
         return response()->json([
             'message' => 'Quiz question removed successfully.',
@@ -313,6 +365,24 @@ class QuizQuestionController extends Controller
         $quiz->update([
             'total_marks' => $totalMarks,
         ]);
+    }
+
+    private function assertQuizQuestionLinkDoesNotExist(
+        int $quizId,
+        int $questionBankId,
+        ?int $ignoreId = null
+    ): void {
+        $exists = QuizQuestion::query()
+            ->where('quiz_id', $quizId)
+            ->where('question_bank_id', $questionBankId)
+            ->when($ignoreId !== null, fn ($query) => $query->where('id', '!=', $ignoreId))
+            ->exists();
+
+        if ($exists) {
+            throw ValidationException::withMessages([
+                'question_bank_id' => 'The question has already been added to this quiz.',
+            ]);
+        }
     }
 
     private function authorizeQuizQuestionAccess(

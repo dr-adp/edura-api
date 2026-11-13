@@ -2,12 +2,12 @@
 
 namespace App\Http\Controllers\Api;
 
-use Illuminate\Support\Facades\DB;
 use App\Services\CourseEnrollmentService;
+use App\Services\CourseAssessmentLockService;
+use App\Exceptions\AssessmentLockSetChanged;
 use App\Models\CourseEnrollment;
-use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use App\Http\Controllers\Api\BaseApiController;
 use App\Models\Course;
 use App\Models\InstitutionUser;
@@ -21,8 +21,10 @@ use App\Http\Requests\UpdateCourseEnrollmentRequest;
 class CourseEnrollmentController extends BaseApiController
 {
     protected CourseEnrollmentService $service;
+
     public function __construct(
-        CourseEnrollmentService $service
+        CourseEnrollmentService $service,
+        private CourseAssessmentLockService $courseAssessmentLockService
     ) {
         $this->service = $service;
     }
@@ -143,21 +145,10 @@ class CourseEnrollmentController extends BaseApiController
             $validated['enrollment_date']
             ?? now()->toDateString();
 
-        $course = Course::findOrFail(
-            $validated['course_id']
-        );
-
-        $studentProfile = StudentProfile::findOrFail(
-            $validated['student_profile_id']
-        );
-
-        $this->authorizeCourseEnrollmentManagement(
-            $course,
-            $studentProfile
-        );
-
         $enrollment = $this->service->create(
-            $validated
+            $validated,
+            fn (Course $course, StudentProfile $studentProfile) =>
+                $this->authorizeCourseEnrollmentManagement($course, $studentProfile)
         );
 
         return $this->successResponse(
@@ -195,12 +186,6 @@ class CourseEnrollmentController extends BaseApiController
         UpdateCourseEnrollmentRequest $request,
         CourseEnrollment $courseEnrollment
     ): JsonResponse {
-
-        /*
-    |--------------------------------------------------------------------------
-    | Access Validation
-    |--------------------------------------------------------------------------
-    */
         $this->authorizeCourseEnrollmentAccess(
             $courseEnrollment
         );
@@ -208,134 +193,70 @@ class CourseEnrollmentController extends BaseApiController
         /** @var User $user */
         $user = Auth::user();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Validation
-    |--------------------------------------------------------------------------
-    */
         $validated = $request->validated();
+        $updatedEnrollment = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use (
+                $courseEnrollment,
+                $validated,
+                $user
+            ): CourseEnrollment {
+                $context = $this->lockEnrollmentMutationContext(
+                    (int) $courseEnrollment->id,
+                    $validated['course_id'] ?? null,
+                    $validated['student_profile_id'] ?? null
+                );
+                /** @var CourseEnrollment $lockedEnrollment */
+                $lockedEnrollment = $context['enrollment'];
 
-        /*
-    |--------------------------------------------------------------------------
-    | Resolve Target Records
-    |--------------------------------------------------------------------------
-    */
-        $course = Course::findOrFail(
-            $validated['course_id']
-                ?? $courseEnrollment->course_id
-        );
+                $this->authorizeCourseEnrollmentAccess($lockedEnrollment);
+                $this->authorizeCourseEnrollmentManagement(
+                    $context['target_course'],
+                    $context['target_student']
+                );
 
-        $studentProfile = StudentProfile::findOrFail(
-            $validated['student_profile_id']
-                ?? $courseEnrollment->student_profile_id
-        );
+                if ($user->hasRole('student')) {
+                    abort(403, 'Students cannot modify enrollments.');
+                }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Management Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeCourseEnrollmentManagement(
-            $course,
-            $studentProfile
-        );
+                if ($user->hasRole('parent')) {
+                    abort(403, 'Parents cannot modify enrollments.');
+                }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Students Cannot Modify Enrollment
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('student')) {
+                $attributes = $validated;
 
-            abort(
-                403,
-                'Students cannot modify enrollments.'
-            );
-        }
+                if (
+                    isset($attributes['progress_percentage']) &&
+                    (float) $attributes['progress_percentage'] >= 100
+                ) {
+                    $attributes['progress_percentage'] = 100;
+                    $attributes['status'] = 'completed';
+                    $attributes['completed_at'] = now();
+                }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Parent Restriction
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('parent')) {
+                if (
+                    ($attributes['status'] ?? null) === 'completed' &&
+                    empty($attributes['completed_at'])
+                ) {
+                    $attributes['completed_at'] = now();
+                }
 
-            abort(
-                403,
-                'Parents cannot modify enrollments.'
-            );
-        }
+                if (
+                    isset($attributes['amount_paid']) &&
+                    $attributes['amount_paid'] > 0 &&
+                    ($attributes['payment_status'] ?? $lockedEnrollment->payment_status) === 'free'
+                ) {
+                    abort(422, 'Free enrollment cannot contain paid amount.');
+                }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Auto Completion
-    |--------------------------------------------------------------------------
-    */
-        if (
-            isset(
-                $validated['progress_percentage']
-            ) &&
-            (float) $validated['progress_percentage'] >= 100
-        ) {
+                $lockedEnrollment->fill($attributes);
+                $lockedEnrollment->save();
+                $this->service->recalculateProgressWithinTransaction($lockedEnrollment);
 
-            $validated['progress_percentage'] = 100;
-
-            $validated['status'] = 'completed';
-
-            $validated['completed_at'] = now();
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Prevent Invalid Completion State
-    |--------------------------------------------------------------------------
-    */
-        if (
-            ($validated['status'] ?? null)
-            === 'completed'
-            &&
-            empty($validated['completed_at'])
-        ) {
-
-            $validated['completed_at'] = now();
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Prevent Negative Business Logic
-    |--------------------------------------------------------------------------
-    */
-        if (
-            isset(
-                $validated['amount_paid']
-            )
-            &&
-            $validated['amount_paid'] > 0
-            &&
-            (
-                $validated['payment_status']
-                ?? $courseEnrollment->payment_status
-            ) === 'free'
-        ) {
-
-            abort(
-                422,
-                'Free enrollment cannot contain paid amount.'
-            );
-        }
-
-        $courseEnrollment->fill(
-            $validated
-        );
-
-        $courseEnrollment->save();
-
-        $this->service->recalculateProgress($courseEnrollment);
+                return $lockedEnrollment->fresh();
+            });
 
         return $this->successResponse(
-            $courseEnrollment
-                ->fresh()
-                ->load([
+            $updatedEnrollment->load([
                     'course',
                     'studentProfile.user',
                     'studentProfile.institution',
@@ -361,58 +282,157 @@ class CourseEnrollmentController extends BaseApiController
         /** @var User $user */
         $user = Auth::user();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Parent Restriction
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('parent')) {
+        $this->courseAssessmentLockService->transactionWithLockSetRetries(
+            function () use ($courseEnrollment, $user): void {
+                $context = $this->lockEnrollmentMutationContext(
+                    (int) $courseEnrollment->id
+                );
+                /** @var CourseEnrollment $lockedEnrollment */
+                $lockedEnrollment = $context['enrollment'];
 
-            abort(
-                403,
-                'Parents cannot delete enrollments.'
-            );
-        }
+                $this->authorizeCourseEnrollmentAccess($lockedEnrollment);
 
-        /*
-    |--------------------------------------------------------------------------
-    | Student Restriction
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('student')) {
+                if ($user->hasRole('parent')) {
+                    abort(403, 'Parents cannot delete enrollments.');
+                }
 
-            abort(
-                403,
-                'Students cannot delete enrollments.'
-            );
-        }
+                if ($user->hasRole('student')) {
+                    abort(403, 'Students cannot delete enrollments.');
+                }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Protect Completed Enrollments
-    |--------------------------------------------------------------------------
-    */
-        if (
-            $courseEnrollment->status === 'completed'
-        ) {
+                if ($lockedEnrollment->status === 'completed') {
+                    abort(422, 'Completed enrollments cannot be deleted.');
+                }
 
-            abort(
-                422,
-                'Completed enrollments cannot be deleted.'
-            );
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Soft Delete
-    |--------------------------------------------------------------------------
-    */
-        $courseEnrollment->delete();
+                $lockedEnrollment->delete();
+            }
+        );
 
         return $this->successResponse(
             null,
             'Course enrollment deleted successfully.'
         );
+    }
+
+    /**
+     * Lock old and requested parent pairs before locking the enrollment row.
+     * A changed pair escapes the transaction so the complete operation can
+     * retry with a fresh parent set.
+     *
+     * @return array{
+     *     enrollment:CourseEnrollment,
+     *     target_course:Course,
+     *     target_student:StudentProfile
+     * }
+     */
+    private function lockEnrollmentMutationContext(
+        int $enrollmentId,
+        ?int $requestedCourseId = null,
+        ?int $requestedStudentProfileId = null
+    ): array {
+        $identity = CourseEnrollment::query()
+            ->whereKey($enrollmentId)
+            ->firstOrFail();
+        $oldCourseId = (int) $identity->course_id;
+        $oldStudentProfileId = (int) $identity->student_profile_id;
+        $targetCourseId = $requestedCourseId ?? $oldCourseId;
+        $targetStudentProfileId = $requestedStudentProfileId ?? $oldStudentProfileId;
+
+        $courseIds = array_values(array_unique([$oldCourseId, $targetCourseId]));
+        $studentProfileIds = array_values(array_unique([
+            $oldStudentProfileId,
+            $targetStudentProfileId,
+        ]));
+        sort($courseIds, SORT_NUMERIC);
+        sort($studentProfileIds, SORT_NUMERIC);
+
+        $lockedCourses = collect();
+        foreach ($courseIds as $courseId) {
+            $lockedCourses->put(
+                $courseId,
+                $this->courseAssessmentLockService->lockCourse(
+                    $courseId,
+                    withTrashed: false
+                )
+            );
+        }
+
+        $lockedStudents = collect();
+        foreach ($studentProfileIds as $studentProfileId) {
+            $lockedStudents->put(
+                $studentProfileId,
+                $this->courseAssessmentLockService->lockStudent($studentProfileId)
+            );
+        }
+
+        $pairs = [
+            [
+                'course_id' => $oldCourseId,
+                'student_profile_id' => $oldStudentProfileId,
+            ],
+            [
+                'course_id' => $targetCourseId,
+                'student_profile_id' => $targetStudentProfileId,
+            ],
+        ];
+        $lockedPairs = $this->courseAssessmentLockService
+            ->lockCourseEnrollments($pairs);
+        $enrollment = $lockedPairs->first(
+            fn (CourseEnrollment $candidate): bool =>
+                (int) $candidate->id === $enrollmentId
+        );
+
+        if (! $enrollment) {
+            $currentEnrollment = CourseEnrollment::withTrashed()
+                ->whereKey($enrollmentId)
+                ->first();
+
+            if (! $currentEnrollment) {
+                abort(404);
+            }
+
+            throw new AssessmentLockSetChanged(
+                array_merge($courseIds, [(int) $currentEnrollment->course_id]),
+                array_merge($studentProfileIds, [(int) $currentEnrollment->student_profile_id])
+            );
+        }
+
+        if (
+            $enrollment->trashed() ||
+            (int) $enrollment->course_id !== $oldCourseId ||
+            (int) $enrollment->student_profile_id !== $oldStudentProfileId
+        ) {
+            throw new AssessmentLockSetChanged(
+                array_merge($courseIds, [(int) $enrollment->course_id]),
+                array_merge($studentProfileIds, [(int) $enrollment->student_profile_id])
+            );
+        }
+
+        $targetEnrollment = $lockedPairs->first(
+            fn (CourseEnrollment $lockedPair): bool =>
+                (int) $lockedPair->course_id === $targetCourseId &&
+                (int) $lockedPair->student_profile_id === $targetStudentProfileId
+        );
+
+        if ($targetEnrollment && (int) $targetEnrollment->id !== $enrollmentId) {
+            throw ValidationException::withMessages([
+                'student_profile_id' => 'The student is already enrolled in this course.',
+            ]);
+        }
+
+        $oldCourse = $lockedCourses->get($oldCourseId);
+        $oldStudent = $lockedStudents->get($oldStudentProfileId);
+        $targetCourse = $lockedCourses->get($targetCourseId);
+        $targetStudent = $lockedStudents->get($targetStudentProfileId);
+
+        $enrollment->setRelation('course', $oldCourse);
+        $enrollment->setRelation('studentProfile', $oldStudent);
+
+        return [
+            'enrollment' => $enrollment,
+            'target_course' => $targetCourse,
+            'target_student' => $targetStudent,
+        ];
     }
 
     private function authorizeCourseEnrollmentAccess(

@@ -8,19 +8,23 @@ use App\Http\Requests\StoreCourseRequest;
 use App\Http\Requests\UpdateCourseRequest;
 use App\Models\Course;
 use App\Models\InstitutionUser;
+use App\Models\TeacherProfile;
 use App\Models\User;
+use App\Services\CourseAssessmentLockService;
 use App\Services\SubscriptionService;
 use App\Services\UsageStatisticsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Illuminate\Validation\ValidationException;
 
 class CourseController extends BaseApiController
 {
     public function __construct(
         private readonly SubscriptionService $subscriptionService,
-        private readonly UsageStatisticsService $usageStatisticsService
+        private readonly UsageStatisticsService $usageStatisticsService,
+        private readonly CourseAssessmentLockService $courseAssessmentLockService
     ) {}
 
     public function index(): JsonResponse
@@ -304,219 +308,176 @@ class CourseController extends BaseApiController
         UpdateCourseRequest $request,
         Course $course
     ): JsonResponse {
-        /*
-    |--------------------------------------------------------------------------
-    | Existing Course Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorize('update', $course);
-
         /** @var User $user */
         $user = Auth::user();
-
         $validated = $request->validated();
+        $courseId = (int) $course->getKey();
+        $subscriptionMissing = false;
 
-        /*
-    |--------------------------------------------------------------------------
-    | Institution Admin Restrictions
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('institution-admin')) {
+        $course = $this->courseAssessmentLockService->transactionWithLockSetRetries(
+            function () use (
+                $courseId,
+                $validated,
+                $user,
+                &$subscriptionMissing
+            ): Course {
+                $subscriptionMissing = false;
 
-            $institutionUser = InstitutionUser::where(
-                'user_id',
-                $user->id
-            )->first();
-
-            if (!$institutionUser) {
-                abort(
-                    403,
-                    'Institution profile not found.'
+                // All state-based checks run only after the course gate is held.
+                $lockedCourse = $this->courseAssessmentLockService->lockCourse(
+                    $courseId,
+                    withTrashed: false
                 );
-            }
+                $this->authorize('update', $lockedCourse);
 
-            $validated['institution_id'] =
-                $institutionUser->institution_id;
-        }
+                if ($user->hasRole('institution-admin')) {
+                    $institutionUser = InstitutionUser::where(
+                        'user_id',
+                        $user->id
+                    )->first();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Teacher Restrictions
-    |--------------------------------------------------------------------------
-    */
-        if ($user->hasRole('teacher')) {
+                    if (!$institutionUser) {
+                        abort(403, 'Institution profile not found.');
+                    }
 
-            $teacherProfile = $user->teacherProfile;
+                    $validated['institution_id'] = $institutionUser->institution_id;
+                }
 
-            if (!$teacherProfile) {
-                abort(
-                    403,
-                    'Teacher profile not found.'
+                if ($user->hasRole('teacher')) {
+                    $teacherProfile = TeacherProfile::where(
+                        'user_id',
+                        $user->id
+                    )->first();
+
+                    if (!$teacherProfile) {
+                        abort(403, 'Teacher profile not found.');
+                    }
+
+                    // Teachers retain their current ownership and institution boundary.
+                    $validated['teacher_profile_id'] = $teacherProfile->id;
+                    $validated['institution_id'] = $teacherProfile->institution_id;
+                }
+
+                $targetInstitutionId = array_key_exists('institution_id', $validated)
+                    ? $this->nullableId($validated['institution_id'])
+                    : $this->nullableId($lockedCourse->institution_id);
+                $targetTeacherProfileId = array_key_exists('teacher_profile_id', $validated)
+                    ? $this->nullableId($validated['teacher_profile_id'])
+                    : $this->nullableId($lockedCourse->teacher_profile_id);
+
+                $this->authorizeCourseAccess(
+                    institutionId: $targetInstitutionId,
+                    teacherProfileId: $targetTeacherProfileId
                 );
+
+                $targetDepartmentId = array_key_exists('department_id', $validated)
+                    ? $this->nullableId($validated['department_id'])
+                    : $this->nullableId($lockedCourse->department_id);
+                $targetBatchId = array_key_exists('batch_id', $validated)
+                    ? $this->nullableId($validated['batch_id'])
+                    : $this->nullableId($lockedCourse->batch_id);
+
+                $relationshipValues = [
+                    'institution_id' => $targetInstitutionId,
+                    'department_id' => $targetDepartmentId,
+                    'batch_id' => $targetBatchId,
+                    'teacher_profile_id' => $targetTeacherProfileId,
+                ];
+                $relationshipChanged = $relationshipValues !== [
+                    'institution_id' => $this->nullableId($lockedCourse->institution_id),
+                    'department_id' => $this->nullableId($lockedCourse->department_id),
+                    'batch_id' => $this->nullableId($lockedCourse->batch_id),
+                    'teacher_profile_id' => $this->nullableId($lockedCourse->teacher_profile_id),
+                ];
+
+                if ($relationshipChanged) {
+                    $this->validateCourseRelationships($relationshipValues);
+                }
+
+                $oldInstitutionId = $this->nullableId($lockedCourse->institution_id);
+                $institutionChanged = $oldInstitutionId !== $targetInstitutionId;
+
+                if (
+                    $institutionChanged &&
+                    $this->courseHasDependentRecords($courseId)
+                ) {
+                    throw ValidationException::withMessages([
+                        'institution_id' => 'A course institution cannot be changed after course content, enrollments, assessments, gradebooks, or certificates exist.',
+                    ]);
+                }
+
+                $oldStatus = $lockedCourse->status;
+                $newStatus = $validated['status'] ?? $oldStatus;
+                $wasBillable = in_array($oldStatus, ['draft', 'published'], true);
+                $willBeBillable = in_array($newStatus, ['draft', 'published'], true);
+
+                $subscriptionRequired = $willBeBillable &&
+                    (!$wasBillable || $institutionChanged);
+
+                if ($subscriptionRequired) {
+                    // Keep the existing zero-usage record behavior for archived-course reactivation.
+                    if (!$wasBillable && $targetInstitutionId !== null) {
+                        $this->usageStatisticsService->ensure(
+                            institution: $targetInstitutionId,
+                            metric: 'courses'
+                        );
+                    }
+
+                    $subscription = $targetInstitutionId === null
+                        ? null
+                        : $this->subscriptionService->currentForInstitution(
+                            $targetInstitutionId
+                        );
+
+                    if ($subscription === null) {
+                        // Return normally so an ensure() above commits as before; throw after the transaction.
+                        $subscriptionMissing = true;
+
+                        return $lockedCourse;
+                    }
+                }
+
+                if (isset($validated['title'])) {
+                    $validated['slug'] = Str::slug($validated['title']) . '-' . time();
+                }
+
+                // Lock usage rows in institution ID order if a course changes institution.
+                $usageAdjustments = [];
+                if ($wasBillable && ($institutionChanged || !$willBeBillable) && $oldInstitutionId !== null) {
+                    $usageAdjustments[$oldInstitutionId] = ($usageAdjustments[$oldInstitutionId] ?? 0) - 1;
+                }
+                if ($willBeBillable && ($institutionChanged || !$wasBillable) && $targetInstitutionId !== null) {
+                    $usageAdjustments[$targetInstitutionId] = ($usageAdjustments[$targetInstitutionId] ?? 0) + 1;
+                }
+                ksort($usageAdjustments, SORT_NUMERIC);
+
+                foreach ($usageAdjustments as $institutionId => $amount) {
+                    if ($amount > 0) {
+                        $this->usageStatisticsService->increment(
+                            institution: (int) $institutionId,
+                            metric: 'courses',
+                            amount: $amount
+                        );
+                    } elseif ($amount < 0) {
+                        $this->usageStatisticsService->decrement(
+                            institution: (int) $institutionId,
+                            metric: 'courses',
+                            amount: abs($amount)
+                        );
+                    }
+                }
+
+                $lockedCourse->update($validated);
+
+                return $lockedCourse->fresh();
             }
-
-            /*
-         * Prevent ownership transfer.
-         */
-            $validated['teacher_profile_id'] =
-                $teacherProfile->id;
-
-            /*
-         * Prevent institution switching.
-         */
-            $validated['institution_id'] =
-                $teacherProfile->institution_id;
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Re-Authorization Of Target Data
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeCourseAccess(
-            institutionId: $validated['institution_id']
-                ?? $course->institution_id,
-
-            teacherProfileId: $validated['teacher_profile_id']
-                ?? $course->teacher_profile_id
         );
 
-        /*
-    |--------------------------------------------------------------------------
-    | Course Status Lifecycle
-    |--------------------------------------------------------------------------
-    |
-    | Billable statuses:
-    | - draft
-    | - published
-    |
-    | Non-billable status:
-    | - archived
-    |
-    */
-        $oldStatus = $course->status;
-        $newStatus = $validated['status'] ?? $oldStatus;
-
-        $wasBillable = in_array(
-            $oldStatus,
-            ['draft', 'published'],
-            true
-        );
-
-        $willBeBillable = in_array(
-            $newStatus,
-            ['draft', 'published'],
-            true
-        );
-
-        $statusChanged = $oldStatus !== $newStatus;
-
-        /*
-    |--------------------------------------------------------------------------
-    | Subscription Requirement
-    |--------------------------------------------------------------------------
-    |
-    | Only archived -> draft/published requires a new subscription
-    | capacity check.
-    |
-    */
-        if (
-            $statusChanged &&
-            !$wasBillable &&
-            $willBeBillable
-        ) {
-            /*
-     * Maintain a zero usage record before attempting
-     * to restore an archived course.
-     *
-     * This also gives us a consistent usage state when
-     * the transition is rejected because there is no
-     * active subscription.
-     */
-            $this->usageStatisticsService->ensure(
-                institution: (int) $course->institution_id,
-                metric: 'courses'
+        if ($subscriptionMissing) {
+            throw new DomainException(
+                'No active subscription found for this institution.'
             );
-
-            $subscription = $this->subscriptionService
-                ->currentForInstitution(
-                    (int) $course->institution_id
-                );
-
-            if ($subscription === null) {
-                throw new DomainException(
-                    'No active subscription found for this institution.'
-                );
-            }
         }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Slug Update
-    |--------------------------------------------------------------------------
-    */
-        if (isset($validated['title'])) {
-
-            $validated['slug'] =
-                Str::slug($validated['title'])
-                . '-' . time();
-        }
-
-        /*
-    |--------------------------------------------------------------------------
-    | Course Update + Usage Accounting
-    |--------------------------------------------------------------------------
-    |
-    | Usage changes and course update happen inside one transaction.
-    |
-    */
-        $course = DB::transaction(function () use (
-            $course,
-            $validated,
-            $statusChanged,
-            $wasBillable,
-            $willBeBillable
-        ) {
-            /*
-         * Billable -> Archived
-         *
-         * draft -> archived
-         * published -> archived
-         */
-            if (
-                $statusChanged &&
-                $wasBillable &&
-                !$willBeBillable
-            ) {
-                $this->usageStatisticsService->decrement(
-                    institution: (int) $course->institution_id,
-                    metric: 'courses',
-                    amount: 1
-                );
-            }
-
-            /*
-         * Archived -> Billable
-         *
-         * archived -> draft
-         * archived -> published
-         */
-            if (
-                $statusChanged &&
-                !$wasBillable &&
-                $willBeBillable
-            ) {
-                $this->usageStatisticsService->increment(
-                    institution: (int) $course->institution_id,
-                    metric: 'courses',
-                    amount: 1
-                );
-            }
-
-            $course->update($validated);
-
-            return $course->fresh();
-        });
 
         return $this->successResponse(
             $course->load([
@@ -531,14 +492,20 @@ class CourseController extends BaseApiController
 
     public function destroy(Course $course): JsonResponse
     {
-        /*
-        |--------------------------------------------------------------------------
-        | Authorization
-        |--------------------------------------------------------------------------
-        */
-        $this->authorize('delete', $course);
+        $courseId = (int) $course->getKey();
 
-        $course->delete();
+        $this->courseAssessmentLockService->transactionWithLockSetRetries(
+            function () use ($courseId): void {
+                $lockedCourse = $this->courseAssessmentLockService->lockCourse(
+                    $courseId,
+                    withTrashed: false
+                );
+                $this->authorize('delete', $lockedCourse);
+
+                // Soft deletion preserves the course and its related records.
+                $lockedCourse->delete();
+            }
+        );
 
         return $this->successResponse(
             null,
@@ -607,7 +574,7 @@ class CourseController extends BaseApiController
         */
         if ($user->hasRole('teacher')) {
 
-            $teacherProfile = $user->teacherProfile;
+            $teacherProfile = TeacherProfile::where('user_id', $user->id)->first();
 
             if (!$teacherProfile) {
                 abort(
@@ -649,5 +616,113 @@ class CourseController extends BaseApiController
             403,
             'Unauthorized role.'
         );
+    }
+
+    /**
+     * Validate the effective course relationships after the course row is locked.
+     * Department, batch, and teacher profile IDs are institution-scoped in the
+     * existing schema, so an update must keep those links within the course tenant.
+     * A batch with a department must also match an explicitly assigned course department.
+     *
+     * @param  array{institution_id:?int, department_id:?int, batch_id:?int, teacher_profile_id:?int}  $relationships
+     */
+    private function validateCourseRelationships(array $relationships): void
+    {
+        $errors = [];
+        $institutionId = $relationships['institution_id'];
+        $departmentId = $relationships['department_id'];
+        $batchId = $relationships['batch_id'];
+        $teacherProfileId = $relationships['teacher_profile_id'];
+
+        if (
+            $institutionId !== null &&
+            !DB::table('institutions')->where('id', $institutionId)->exists()
+        ) {
+            $errors['institution_id'] = 'The selected institution does not exist.';
+        }
+
+        if ($departmentId !== null) {
+            $department = DB::table('departments')
+                ->where('id', $departmentId)
+                ->first(['institution_id']);
+
+            if (
+                !$department ||
+                $institutionId === null ||
+                (int) $department->institution_id !== $institutionId
+            ) {
+                $errors['department_id'] = 'The selected department must belong to the course institution.';
+            }
+        }
+
+        if ($batchId !== null) {
+            $batch = DB::table('batches')
+                ->where('id', $batchId)
+                ->first(['institution_id', 'department_id']);
+
+            if (
+                !$batch ||
+                $institutionId === null ||
+                (int) $batch->institution_id !== $institutionId
+            ) {
+                $errors['batch_id'] = 'The selected batch must belong to the course institution.';
+            } elseif (
+                $departmentId !== null &&
+                $batch->department_id !== null &&
+                (int) $batch->department_id !== $departmentId
+            ) {
+                $errors['batch_id'] = 'The selected batch must belong to the selected course department.';
+            }
+        }
+
+        if ($teacherProfileId !== null) {
+            $teacher = TeacherProfile::query()
+                ->whereKey($teacherProfileId)
+                ->first(['institution_id']);
+
+            if (
+                !$teacher ||
+                $institutionId === null ||
+                (int) $teacher->institution_id !== $institutionId
+            ) {
+                $errors['teacher_profile_id'] = 'The selected teacher must belong to the course institution.';
+            }
+        }
+
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
+    }
+
+    /**
+     * Institution reassignment changes the tenant boundary for every related
+     * course record. Include soft-deleted rows by querying the tables directly;
+     * no existing content or academic history is migrated by this endpoint.
+     */
+    private function courseHasDependentRecords(int $courseId): bool
+    {
+        foreach ([
+            'course_sections',
+            'lessons',
+            'course_enrollments',
+            'live_classes',
+            'attendance_records',
+            'assignments',
+            'question_banks',
+            'quizzes',
+            'gradebooks',
+            'certificates',
+        ] as $table) {
+            if (DB::table($table)->where('course_id', $courseId)->exists()) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function nullableId(mixed $value): ?int
+    {
+        return $value === null ? null : (int) $value;
     }
 }

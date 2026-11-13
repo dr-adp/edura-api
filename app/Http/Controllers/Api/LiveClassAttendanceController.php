@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Exceptions\AssessmentLockSetChanged;
 use App\Models\LiveClassAttendance;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -13,11 +14,19 @@ use App\Models\StudentProfile;
 use App\Models\TeacherProfile;
 use Illuminate\Support\Facades\Auth;
 use App\Models\User;
+use App\Services\CourseAssessmentLockService;
 use App\Http\Requests\StoreLiveClassAttendanceRequest;
 use App\Http\Requests\UpdateLiveClassAttendanceRequest;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 
 class LiveClassAttendanceController extends BaseApiController
 {
+    public function __construct(
+        private CourseAssessmentLockService $courseAssessmentLockService
+    ) {
+    }
+
     public function index(): JsonResponse
     {
         /** @var User $user */
@@ -159,53 +168,70 @@ class LiveClassAttendanceController extends BaseApiController
     */
         $validated = $request->validated();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Load Records
-    |--------------------------------------------------------------------------
-    */
-        $liveClass = LiveClass::findOrFail(
-            $validated['live_class_id']
-        );
+        $liveClassId = (int) $validated['live_class_id'];
+        $studentProfileId = (int) $validated['student_profile_id'];
 
-        $studentProfile = StudentProfile::findOrFail(
-            $validated['student_profile_id']
-        );
+        $attendance = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use (
+                $validated,
+                $liveClassId,
+                $studentProfileId
+            ): LiveClassAttendance {
+                $discoveredCourseId = $this->discoverActiveLiveClassCourseId(
+                    $liveClassId
+                );
+                $course = $this->courseAssessmentLockService->lockCourse(
+                    $discoveredCourseId,
+                    withTrashed: false
+                );
+                $liveClass = $this->courseAssessmentLockService
+                    ->lockLiveClass($liveClassId, withTrashed: false);
+                $currentCourseId = (int) $liveClass->course_id;
 
-        /*
-    |--------------------------------------------------------------------------
-    | Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeLiveClassAttendanceManagement(
-            $liveClass,
-            $studentProfile
-        );
+                if ($currentCourseId !== $discoveredCourseId) {
+                    throw new AssessmentLockSetChanged([
+                        $discoveredCourseId,
+                        $currentCourseId,
+                    ]);
+                }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Prevent Attendance For Cancelled Classes
-    |--------------------------------------------------------------------------
-    */
-        if (
-            isset($liveClass->status) &&
-            $liveClass->status === 'cancelled'
-        ) {
+                if ((int) $course->id !== $currentCourseId) {
+                    throw new AssessmentLockSetChanged([
+                        (int) $course->id,
+                        $currentCourseId,
+                    ]);
+                }
 
-            abort(
-                422,
-                'Attendance cannot be recorded for a cancelled live class.'
-            );
-        }
+                $studentProfile = $this->courseAssessmentLockService
+                    ->lockStudent($studentProfileId);
+                $this->authorizeLiveClassAttendanceManagement(
+                    $liveClass,
+                    $studentProfile
+                );
 
-        /*
-    |--------------------------------------------------------------------------
-    | Create Attendance
-    |--------------------------------------------------------------------------
-    */
-        $attendance = LiveClassAttendance::create(
-            $validated
-        );
+                if ($liveClass->status === 'cancelled') {
+                    abort(
+                        422,
+                        'Attendance cannot be recorded for a cancelled live class.'
+                    );
+                }
+
+                if (
+                    $this->courseAssessmentLockService
+                        ->lockLiveClassAttendancePair($liveClassId, $studentProfileId)
+                ) {
+                    throw ValidationException::withMessages([
+                        'student_profile_id' => 'The student profile id has already been taken.',
+                    ]);
+                }
+
+                return LiveClassAttendance::create($validated)->load([
+                    'liveClass',
+                    'studentProfile.user',
+                    'studentProfile.institution',
+                    'studentProfile.batch',
+                ]);
+            });
 
         return $this->successResponse(
             $attendance->load([
@@ -247,16 +273,6 @@ class LiveClassAttendanceController extends BaseApiController
         UpdateLiveClassAttendanceRequest $request,
         LiveClassAttendance $liveClassAttendance
     ): JsonResponse {
-
-        /*
-    |--------------------------------------------------------------------------
-    | Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeLiveClassAttendanceAccess(
-            $liveClassAttendance
-        );
-
         /*
     |--------------------------------------------------------------------------
     | Validation
@@ -264,43 +280,80 @@ class LiveClassAttendanceController extends BaseApiController
     */
         $validated = $request->validated();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Prevent Updating Cancelled Live Classes
-    |--------------------------------------------------------------------------
-    */
-        $liveClassAttendance->loadMissing(
-            'liveClass'
-        );
+        $attendanceId = (int) $liveClassAttendance->getKey();
 
-        if (
-            isset($liveClassAttendance->liveClass->status) &&
-            $liveClassAttendance->liveClass->status === 'cancelled'
-        ) {
+        $updatedAttendance = $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use (
+                $attendanceId,
+                $validated
+            ): LiveClassAttendance {
+                $identity = $this->discoverActiveAttendanceIdentity($attendanceId);
+                $liveClassId = (int) $identity->live_class_id;
+                $studentProfileId = (int) $identity->student_profile_id;
+                $courseId = $this->discoverActiveLiveClassCourseId($liveClassId);
+                $course = $this->courseAssessmentLockService->lockCourse(
+                    $courseId,
+                    withTrashed: false
+                );
+                $liveClass = $this->courseAssessmentLockService
+                    ->lockLiveClass($liveClassId, withTrashed: false);
 
-            abort(
-                422,
-                'Attendance cannot be modified for a cancelled live class.'
-            );
-        }
+                if ((int) $liveClass->course_id !== $courseId) {
+                    throw new AssessmentLockSetChanged([
+                        $courseId,
+                        (int) $liveClass->course_id,
+                    ]);
+                }
 
-        /*
-    |--------------------------------------------------------------------------
-    | Update Attendance
-    |--------------------------------------------------------------------------
-    */
-        $liveClassAttendance->fill($validated);
-        $liveClassAttendance->save();
+                if ((int) $course->id !== (int) $liveClass->course_id) {
+                    throw new AssessmentLockSetChanged([
+                        (int) $course->id,
+                        (int) $liveClass->course_id,
+                    ]);
+                }
 
-        return $this->successResponse(
-            $liveClassAttendance
-                ->fresh()
-                ->load([
+                $studentProfile = $this->courseAssessmentLockService
+                    ->lockStudent($studentProfileId);
+                $attendance = $this->courseAssessmentLockService
+                    ->lockLiveClassAttendance($attendanceId, withTrashed: false);
+
+                if (
+                    (int) $attendance->live_class_id !== $liveClassId ||
+                    (int) $attendance->student_profile_id !== $studentProfileId
+                ) {
+                    $currentCourseId = $this->discoverActiveLiveClassCourseId(
+                        (int) $attendance->live_class_id
+                    );
+                    throw new AssessmentLockSetChanged(
+                        [$courseId, $currentCourseId],
+                        [$studentProfileId, (int) $attendance->student_profile_id]
+                    );
+                }
+
+                $attendance->setRelation('liveClass', $liveClass);
+                $attendance->setRelation('studentProfile', $studentProfile);
+                $this->authorizeLiveClassAttendanceAccess($attendance);
+
+                if ($liveClass->status === 'cancelled') {
+                    abort(
+                        422,
+                        'Attendance cannot be modified for a cancelled live class.'
+                    );
+                }
+
+                $attendance->fill($validated);
+                $attendance->save();
+
+                return $attendance->fresh()->load([
                     'liveClass',
                     'studentProfile.user',
                     'studentProfile.institution',
                     'studentProfile.batch',
-                ]),
+                ]);
+            });
+
+        return $this->successResponse(
+            $updatedAttendance,
             'Live class attendance updated successfully.'
         );
     }
@@ -308,47 +361,99 @@ class LiveClassAttendanceController extends BaseApiController
     public function destroy(
         LiveClassAttendance $liveClassAttendance
     ): JsonResponse {
+        $attendanceId = (int) $liveClassAttendance->getKey();
 
-        /*
-    |--------------------------------------------------------------------------
-    | Authorization
-    |--------------------------------------------------------------------------
-    */
-        $this->authorizeLiveClassAttendanceAccess(
-            $liveClassAttendance
-        );
+        $this->courseAssessmentLockService
+            ->transactionWithLockSetRetries(function () use ($attendanceId): void {
+                $identity = $this->discoverActiveAttendanceIdentity($attendanceId);
+                $liveClassId = (int) $identity->live_class_id;
+                $studentProfileId = (int) $identity->student_profile_id;
+                $courseId = $this->discoverActiveLiveClassCourseId($liveClassId);
+                $course = $this->courseAssessmentLockService->lockCourse(
+                    $courseId,
+                    withTrashed: false
+                );
+                $liveClass = $this->courseAssessmentLockService
+                    ->lockLiveClass($liveClassId, withTrashed: false);
 
-        /*
-    |--------------------------------------------------------------------------
-    | Prevent Deleting Attendance For Cancelled Live Classes
-    |--------------------------------------------------------------------------
-    */
-        $liveClassAttendance->loadMissing(
-            'liveClass'
-        );
+                if ((int) $liveClass->course_id !== $courseId) {
+                    throw new AssessmentLockSetChanged([
+                        $courseId,
+                        (int) $liveClass->course_id,
+                    ]);
+                }
 
-        if (
-            isset($liveClassAttendance->liveClass->status) &&
-            $liveClassAttendance->liveClass->status === 'cancelled'
-        ) {
+                if ((int) $course->id !== (int) $liveClass->course_id) {
+                    throw new AssessmentLockSetChanged([
+                        (int) $course->id,
+                        (int) $liveClass->course_id,
+                    ]);
+                }
 
-            abort(
-                422,
-                'Attendance cannot be deleted for a cancelled live class.'
-            );
-        }
+                $studentProfile = $this->courseAssessmentLockService
+                    ->lockStudent($studentProfileId);
+                $attendance = $this->courseAssessmentLockService
+                    ->lockLiveClassAttendance($attendanceId, withTrashed: false);
 
-        /*
-    |--------------------------------------------------------------------------
-    | Soft Delete
-    |--------------------------------------------------------------------------
-    */
-        $liveClassAttendance->delete();
+                if (
+                    (int) $attendance->live_class_id !== $liveClassId ||
+                    (int) $attendance->student_profile_id !== $studentProfileId
+                ) {
+                    $currentCourseId = $this->discoverActiveLiveClassCourseId(
+                        (int) $attendance->live_class_id
+                    );
+                    throw new AssessmentLockSetChanged(
+                        [$courseId, $currentCourseId],
+                        [$studentProfileId, (int) $attendance->student_profile_id]
+                    );
+                }
+
+                $attendance->setRelation('liveClass', $liveClass);
+                $attendance->setRelation('studentProfile', $studentProfile);
+                $this->authorizeLiveClassAttendanceAccess($attendance);
+
+                if ($liveClass->status === 'cancelled') {
+                    abort(
+                        422,
+                        'Attendance cannot be deleted for a cancelled live class.'
+                    );
+                }
+
+                $attendance->delete();
+            });
 
         return $this->successResponse(
             null,
             'Live class attendance deleted successfully.'
         );
+    }
+
+    private function discoverActiveAttendanceIdentity(int $attendanceId): object
+    {
+        $identity = DB::table('live_class_attendances')
+            ->where('id', $attendanceId)
+            ->whereNull('deleted_at')
+            ->first(['live_class_id', 'student_profile_id']);
+
+        if (!$identity) {
+            abort(404, 'Live class attendance not found.');
+        }
+
+        return $identity;
+    }
+
+    private function discoverActiveLiveClassCourseId(int $liveClassId): int
+    {
+        $courseId = DB::table('live_classes')
+            ->where('id', $liveClassId)
+            ->whereNull('deleted_at')
+            ->value('course_id');
+
+        if ($courseId === null) {
+            abort(404, 'Live class not found.');
+        }
+
+        return (int) $courseId;
     }
 
     private function authorizeLiveClassAttendanceAccess(
